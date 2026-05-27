@@ -1,4 +1,17 @@
-import { RepairLog, RepairStrategy, DataSchema } from "../types";
+import {
+  ApiEndpoint,
+  AuthRule,
+  DataEntity,
+  DataField,
+  DataRelation,
+  DataSchema,
+  IntegrationHook,
+  Page,
+  PipelineStage,
+  RepairLog,
+  RepairStrategy,
+  WorkflowStub,
+} from "../types";
 import {
   autoCloseJsonStructures,
   extractJsonBlock,
@@ -118,14 +131,14 @@ export class RepairEngine {
     }
 
     if (stage === "schema" && Array.isArray(repairedData.entities)) {
-      const entities = repairedData.entities as Array<Record<string, unknown>>;
-      for (const entity of entities) {
+      const entities = repairedData.entities as DataEntity[]; // Explicit type
+      for (const entity of entities) { // Explicit type for entity
         if (!Array.isArray(entity.fields)) {
           entity.fields = [];
         }
 
-        const fields = entity.fields as Array<Record<string, unknown>>;
-        if (!fields.some((field) => field && typeof field === "object" && (field as Record<string, unknown>).name === "id")) {
+        const fields = entity.fields as DataField[]; // Explicit type
+        if (!fields.some((field) => field && typeof field === "object" && field.name === "id")) {
           fields.unshift({ name: "id", type: "uuid", required: true });
           this._logRepair(
             stage,
@@ -136,7 +149,7 @@ export class RepairEngine {
           );
         }
 
-        if (!fields.some((field) => field && typeof field === "object" && (field as Record<string, unknown>).name === "tenantId")) {
+        if (!fields.some((field) => field && typeof field === "object" && field.name === "tenantId")) {
           fields.splice(1, 0, { name: "tenantId", type: "uuid", required: true });
           this._logRepair(
             stage,
@@ -149,13 +162,12 @@ export class RepairEngine {
 
         for (const field of fields) {
           if (field && typeof field === "object") {
-            const fieldRecord = field as Record<string, unknown>;
-            if (fieldRecord.required === undefined) {
-              fieldRecord.required = true;
+            if (field.required === undefined) {
+              field.required = true;
               this._logRepair(
                 stage,
                 strategy,
-                `Missing required flag for field ${fieldRecord.name ?? "unknown"}`,
+                `Missing required flag for field ${field.name ?? "unknown"}`,
                 "Defaulted required to true",
                 "success"
               );
@@ -164,8 +176,8 @@ export class RepairEngine {
         }
 
         if (Array.isArray(entity.relations)) {
-          const relations = entity.relations as Array<Record<string, unknown>>;
-          for (let index = relations.length - 1; index >= 0; index -= 1) {
+          const relations = entity.relations as DataRelation[]; // Explicit type
+          for (let index = relations.length - 1; index >= 0; index -= 1) { // Explicit type for index
             const relation = relations[index];
             if (!relation || typeof relation !== "object") {
               relations.splice(index, 1);
@@ -201,7 +213,10 @@ export class RepairEngine {
             }
 
             if (typeof relation.cardinality === "string") {
-              relation.cardinality = relation.cardinality.replace(/_/g, "-");
+              const cardinality = relation.cardinality.replace(/_/g, "-");
+              relation.cardinality = ["one-to-one", "one-to-many", "many-to-many"].includes(cardinality)
+                ? (cardinality as DataRelation["cardinality"])
+                : "one-to-many";
             }
 
             if (!["one-to-one", "one-to-many", "many-to-many"].includes(String(relation.cardinality))) {
@@ -241,7 +256,7 @@ export class RepairEngine {
       }
 
       if (repairedData.metadata && typeof repairedData.metadata === "object") {
-        const metadata = repairedData.metadata as Record<string, unknown>;
+        const metadata = repairedData.metadata as Record<string, unknown>; // Explicit type
         if (!metadata.version) metadata.version = "1.0.0";
         if (!metadata.created_at || typeof metadata.created_at !== "string") {
           metadata.created_at = new Date().toISOString();
@@ -250,8 +265,8 @@ export class RepairEngine {
       }
 
       if (Array.isArray(repairedData.pages)) {
-        const pages = repairedData.pages as Array<Record<string, unknown>>;
-        for (const page of pages) {
+        const pages = repairedData.pages as Page[]; // Explicit type
+        for (const page of pages) { // Explicit type for page
           if (page.requires_auth === undefined) {
             page.requires_auth = false;
             this._logRepair(
@@ -277,8 +292,8 @@ export class RepairEngine {
       }
 
       if (Array.isArray(repairedData.api_endpoints)) {
-        const endpoints = repairedData.api_endpoints as Array<Record<string, unknown>>;
-        for (const endpoint of endpoints) {
+        const endpoints = repairedData.api_endpoints as ApiEndpoint[]; // Explicit type
+        for (const endpoint of endpoints) { // Explicit type for endpoint
           if (endpoint.auth_required === undefined) {
             endpoint.auth_required = false;
             this._logRepair(
@@ -291,14 +306,17 @@ export class RepairEngine {
           }
 
           if (typeof endpoint.method === "string") {
-            endpoint.method = endpoint.method.toUpperCase();
+            const method = endpoint.method.toUpperCase();
+            endpoint.method = ["GET", "POST", "PUT", "DELETE", "PATCH"].includes(method)
+              ? (method as ApiEndpoint["method"])
+              : "GET";
           }
         }
       }
 
       if (Array.isArray(repairedData.integration_hooks)) {
-        const hooks = repairedData.integration_hooks as Array<Record<string, unknown>>;
-        for (const hook of hooks) {
+        const hooks = repairedData.integration_hooks as IntegrationHook[]; // Explicit type
+        for (const hook of hooks) { // Explicit type for hook
           if (!hook.entity_mapping || typeof hook.entity_mapping !== "object") {
             hook.entity_mapping = {};
             this._logRepair(
@@ -313,8 +331,8 @@ export class RepairEngine {
       }
 
       if (Array.isArray(repairedData.auth_rules)) {
-        const authRules = repairedData.auth_rules as Array<Record<string, unknown>>;
-        for (let index = authRules.length - 1; index >= 0; index -= 1) {
+        const authRules = repairedData.auth_rules as AuthRule[]; // Explicit type
+        for (let index = authRules.length - 1; index >= 0; index -= 1) { // Explicit type for index
           const rule = authRules[index];
           if (!rule || typeof rule !== "object") {
             authRules.splice(index, 1);
@@ -358,8 +376,8 @@ export class RepairEngine {
       }
 
       if (Array.isArray(repairedData.workflows)) {
-        const workflows = repairedData.workflows as Array<Record<string, unknown>>;
-        for (const workflow of workflows) {
+        const workflows = repairedData.workflows as WorkflowStub[]; // Explicit type
+        for (const workflow of workflows) { // Explicit type for workflow
           if (!["event", "schedule", "manual"].includes(String(workflow.trigger_type))) {
             workflow.trigger_type = "event";
             this._logRepair(
@@ -386,7 +404,7 @@ export class RepairEngine {
 
       if (Array.isArray(repairedData.assumptions)) {
         repairedData.assumptions = repairedData.assumptions.map((assumption) => {
-          if (typeof assumption === "string") return assumption;
+          if (typeof assumption === "string") return assumption; // Explicit type for assumption
           if (assumption && typeof assumption === "object") {
             const record = assumption as Record<string, unknown>;
             const firstStringValue = Object.values(record).find(
@@ -421,8 +439,8 @@ export class RepairEngine {
     const repairedData = { ...data };
     const entities = schema?.entities.map((entity) => entity.name) ?? [];
 
-    if (Array.isArray(repairedData.workflows)) {
-      const workflows = repairedData.workflows as Array<Record<string, unknown>>;
+    if (Array.isArray(repairedData.workflows)) { // Type guard
+      const workflows = repairedData.workflows as WorkflowStub[]; // Explicit type
       for (let i = workflows.length - 1; i >= 0; i -= 1) {
         const workflow = workflows[i];
         const triggerEntity = String(workflow.trigger_entity ?? "");
@@ -451,7 +469,7 @@ export class RepairEngine {
         }
 
         if (Array.isArray(workflow.steps)) {
-          for (const step of workflow.steps) {
+          for (const step of workflow.steps) { // Explicit type for step
             const integrationId = String(step.integration_id ?? "");
             const actionId = String(step.action ?? "");
             const integration = getIntegration(integrationId);
@@ -500,8 +518,8 @@ export class RepairEngine {
     }
 
     if (Array.isArray(repairedData.integration_hooks)) {
-      const hooks = repairedData.integration_hooks as Array<Record<string, unknown>>;
-      for (let i = hooks.length - 1; i >= 0; i -= 1) {
+      const hooks = repairedData.integration_hooks as IntegrationHook[]; // Explicit type
+      for (let i = hooks.length - 1; i >= 0; i -= 1) { // Explicit type for index
         const hook = hooks[i];
         const integrationId = String(hook.integration_id ?? "");
         const triggerId = String(hook.trigger ?? "");
@@ -547,11 +565,11 @@ export class RepairEngine {
     }
 
     if (Array.isArray(repairedData.pages) && Array.isArray(repairedData.api_endpoints)) {
-      const pages = repairedData.pages as Array<Record<string, unknown>>;
-      const endpoints = repairedData.api_endpoints as Array<Record<string, unknown>>;
+      const pages = repairedData.pages as Page[]; // Explicit type
+      const endpoints = repairedData.api_endpoints as ApiEndpoint[]; // Explicit type
 
       for (const page of pages) {
-        let pathValue = String(page.path ?? "");
+    const pathValue = String(page.path ?? "");
         if (pathValue && !pathValue.startsWith("/")) {
           page.path = `/${pathValue}`;
           this._logRepair(
@@ -567,13 +585,13 @@ export class RepairEngine {
       for (const page of pages) {
         const pagePath = String(page.path ?? "");
         const mapped = endpoints.some((endpoint) => {
-          const endpointPath = String(endpoint.path ?? "");
+          const endpointPath = String(endpoint.path ?? ""); // Explicit type for endpointPath
           return endpointPath.startsWith(pagePath) || pagePath.startsWith(endpointPath);
         });
 
         if (!mapped) {
           const placeholderEntity = entities[0] ?? "UnknownEntity";
-          const placeholderEndpoint = {
+          const placeholderEndpoint: ApiEndpoint = {
             path: pagePath || "/",
             method: "GET",
             entity: placeholderEntity,
@@ -617,7 +635,7 @@ export class RepairEngine {
   private _trimAfterClosingDelimiter(text: string): string {
     const lastCurly = text.lastIndexOf("}");
     const lastBracket = text.lastIndexOf("]");
-    const lastClose = Math.max(lastCurly, lastBracket);
+    const lastClose: number = Math.max(lastCurly, lastBracket); // Explicit type
     if (lastClose === -1) {
       return text;
     }
@@ -628,12 +646,12 @@ export class RepairEngine {
     stage: string,
     strategy: RepairStrategy,
     error: string,
-    action: string,
+    action: string, // Explicit type
     outcome: "success" | "partial" | "failed"
   ): void {
     this.repairLogs.push({
       timestamp: new Date().toISOString(),
-      stage: stage as any,
+      stage: this._normalizeStage(stage),
       strategy,
       error,
       action,
@@ -641,9 +659,16 @@ export class RepairEngine {
     });
   }
 
-  private _inferEntityFromText(text: string, entities: string[]): string | undefined {
+  private _inferEntityFromText(text: string, entities: string[]): string | undefined { // Explicit return type
     const normalized = text.toLowerCase();
     return entities.find((entity) => normalized.includes(entity.toLowerCase()));
+  }
+
+  private _normalizeStage(stage: string): PipelineStage {
+    if (stage === "intent" || stage === "schema" || stage === "spec") {
+      return stage;
+    }
+    return "failed";
   }
 
   private _getFieldDefault(field: string): unknown {

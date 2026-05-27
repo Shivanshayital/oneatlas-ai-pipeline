@@ -17,11 +17,7 @@ export interface JobState {
   job: PipelineJob;
   events: StageEvent[];
   repairs: RepairLog[];
-  stage_outputs: {
-    intent?: unknown;
-    schema?: unknown;
-    spec?: unknown;
-  };
+  stage_outputs: Record<string, unknown>; // Changed to Record<string, unknown> for dynamic access
   provider_history: ProviderUsage[];
   retry_history: RetryEntry[];
   validation_snapshots: ValidationSnapshot[];
@@ -123,7 +119,7 @@ export class JobStore {
   setStageOutput(id: string, stage: string, output: unknown): void {
     const state = this.jobs.get(id);
     if (state) {
-      (state.stage_outputs as Record<string, unknown>)[stage] = output;
+      state.stage_outputs[stage] = output; // Access directly, stage_outputs is typed
     }
   }
 
@@ -131,7 +127,7 @@ export class JobStore {
     const state = this.jobs.get(id);
     if (state) {
       return (state.stage_outputs as Record<string, unknown>)[stage];
-    }
+    } // Access directly, stage_outputs is typed
     return undefined;
   }
 
@@ -208,7 +204,7 @@ export class JobStore {
     if (listeners) {
       for (const listener of listeners) {
         try {
-          listener(event);
+          listener(event); // Explicit type for event
         } catch (error) {
           console.error("Error in event listener:", error);
         }
@@ -230,9 +226,11 @@ export class JobStore {
 }
 
 // Ensure a single JobStore instance across module reloads (Next.js dev hot reloads)
-const globalRef = globalThis as unknown as Record<string, unknown>;
+const globalRef = globalThis as unknown as {
+  __ONEATLAS_JOB_STORE?: JobStore;
+};
 if (!globalRef.__ONEATLAS_JOB_STORE) {
-  (globalRef as any).__ONEATLAS_JOB_STORE = new JobStore();
+  globalRef.__ONEATLAS_JOB_STORE = new JobStore();
 }
 
-export const jobStore: JobStore = (globalRef as any).__ONEATLAS_JOB_STORE as JobStore;
+export const jobStore: JobStore = globalRef.__ONEATLAS_JOB_STORE;

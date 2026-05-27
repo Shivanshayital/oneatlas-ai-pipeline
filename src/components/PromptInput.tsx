@@ -1,13 +1,14 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import type { ReactElement } from "react";
 
 interface PromptInputProps {
   onSubmit: (prompt: string) => Promise<void>;
   disabled?: boolean;
 }
 
-export default function PromptInput({ onSubmit, disabled }: PromptInputProps) {
+export default function PromptInput({ onSubmit, disabled }: PromptInputProps): ReactElement {
   const [value, setValue] = useState("");
 
   return (

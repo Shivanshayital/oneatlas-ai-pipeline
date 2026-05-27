@@ -17,7 +17,7 @@ import {
 // ============================================================================
 
 function zodErrorToValidationError(error: ZodError): ValidationError[] {
-  return error.errors.map((err) => ({
+  return error.errors.map((err: ZodError['errors'][number]) => ({ // Explicit type for err
     field: err.path.join("."),
     message: err.message,
     code: err.code,
@@ -25,7 +25,7 @@ function zodErrorToValidationError(error: ZodError): ValidationError[] {
 }
 
 export class ValidationEngine {
-  validateAppIntent(data: unknown): ValidationResult {
+  validateAppIntent(data: unknown): ValidationResult { // Explicit return type
     try {
       AppIntentSchema.parse(data);
       return { valid: true, errors: [] };
@@ -49,7 +49,7 @@ export class ValidationEngine {
     }
   }
 
-  validateDataSchema(data: unknown): ValidationResult {
+  validateDataSchema(data: unknown): ValidationResult { // Explicit return type
     try {
       DataSchemaSchema.parse(data);
       return { valid: true, errors: [] };
@@ -73,7 +73,7 @@ export class ValidationEngine {
     }
   }
 
-  validateAppSpec(data: unknown): ValidationResult {
+  validateAppSpec(data: unknown): ValidationResult { // Explicit return type
     const baseResult = this._validateAppSpecBase(data);
     if (!baseResult.valid) return baseResult;
 
@@ -86,7 +86,7 @@ export class ValidationEngine {
     };
   }
 
-  private _validateAppSpecBase(data: unknown): ValidationResult {
+  private _validateAppSpecBase(data: unknown): ValidationResult { // Explicit return type
     try {
       AppSpecSchema.parse(data);
       return { valid: true, errors: [] };
@@ -110,7 +110,7 @@ export class ValidationEngine {
     }
   }
 
-  private _validateAppSpecSemantics(spec: Record<string, unknown>): ValidationError[] {
+  private _validateAppSpecSemantics(spec: Record<string, unknown>): ValidationError[] { // Explicit return type
     const errors: ValidationError[] = [];
     const appSpec = spec as {
       data_schema?: { entities?: Array<{ name: string }> };
@@ -132,7 +132,7 @@ export class ValidationEngine {
     );
 
     if (appSpec.api_endpoints) {
-      for (const endpoint of appSpec.api_endpoints) {
+      for (const endpoint of appSpec.api_endpoints) { // Explicit type for endpoint
         if (endpoint.entity && !entityNames.has(endpoint.entity)) {
           errors.push({
             field: `api_endpoints.${endpoint.entity}`,
@@ -144,7 +144,7 @@ export class ValidationEngine {
     }
 
     if (appSpec.workflows) {
-      for (const workflow of appSpec.workflows) {
+      for (const workflow of appSpec.workflows) { // Explicit type for workflow
         if (workflow.trigger_entity && !entityNames.has(workflow.trigger_entity)) {
           errors.push({
             field: `workflows.${workflow.trigger_entity}`,
@@ -166,7 +166,7 @@ export class ValidationEngine {
           });
         }
 
-        for (const step of workflow.steps ?? []) {
+        for (const step of workflow.steps ?? []) { // Explicit type for step
           if (!step.integration_id) continue;
           if (!validateIntegrationReference(step.integration_id)) {
             errors.push({
@@ -201,7 +201,7 @@ export class ValidationEngine {
 
     // Validate integrations exist
     if (appSpec.integration_hooks) {
-      for (const hook of appSpec.integration_hooks) {
+      for (const hook of appSpec.integration_hooks) { // Explicit type for hook
         if (hook.integration_id && !validateIntegrationReference(hook.integration_id)) {
           errors.push({
             field: `integration_hooks.${hook.integration_id}`,
@@ -238,7 +238,7 @@ export class ValidationEngine {
 
     if (appSpec.pages && appSpec.api_endpoints) {
       for (const page of appSpec.pages) {
-        const pagePath = page.path ?? "";
+        const pagePath = page.path ?? ""; // Explicit type for pagePath
         const hasMappedEndpoint = appSpec.api_endpoints.some((endpoint) => {
           const endpointPath = endpoint.path ?? "";
           return endpointPath === pagePath || endpointPath.startsWith(`/api${pagePath}`);
@@ -257,12 +257,12 @@ export class ValidationEngine {
     return errors;
   }
 
-  private _inferEntityFromText(text: string, entities: Set<string>): string | undefined {
+  private _inferEntityFromText(text: string, entities: Set<string>): string | undefined { // Explicit return type
     const normalized = text.toLowerCase();
     return Array.from(entities).find((entity) => normalized.includes(entity.toLowerCase()));
   }
 
-  validateDataEntity(data: unknown): ValidationResult {
+  validateDataEntity(data: unknown): ValidationResult { // Explicit return type
     try {
       DataEntitySchema.parse(data);
       return { valid: true, errors: [] };
@@ -288,3 +288,7 @@ export class ValidationEngine {
 }
 
 export const validationEngine = new ValidationEngine();
+
+export function createValidationEngine(): ValidationEngine {
+  return new ValidationEngine();
+}

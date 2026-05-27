@@ -62,7 +62,7 @@ export async function GET(
 
     return NextResponse.json(response);
   } catch (error) {
-    logger.error("GET /api/generate/:jobId failed", error as Error);
+    logger.error("GET /api/generate/:jobId failed", error as Error); // Explicit cast
     return NextResponse.json(
       { error: "Failed to retrieve job" },
       { status: 500 }

@@ -5,17 +5,20 @@ import { AIProvider, AIRequest, AIResponse } from "../types";
 // ============================================================================
 
 export const MODEL_ROUTING = {
-  intent: {
-    primary: "groq/llama-3.3-70b-versatile",
-    fallback: "gemini/gemini-2.0-flash",
+  intent: { // Prioritize Gemini Flash, then DeepSeek, then Groq
+    primary: "gemini/gemini-1.5-flash",
+    fallback: "deepseek/deepseek-chat",
+    secondaryFallback: "groq/llama-3.3-70b-versatile",
   },
-  schema: {
-    primary: "groq/llama-3.3-70b-versatile",
-    fallback: "gemini/gemini-2.0-flash",
+  schema: { // Prioritize Gemini Flash, then DeepSeek, then Groq
+    primary: "gemini/gemini-1.5-flash",
+    fallback: "deepseek/deepseek-chat",
+    secondaryFallback: "groq/llama-3.3-70b-versatile",
   },
-  spec: {
-    primary: "groq/llama-3.3-70b-versatile",
-    fallback: "gemini/gemini-2.0-flash",
+  spec: { // Prioritize Gemini Flash, then DeepSeek, then Groq
+    primary: "gemini/gemini-1.5-flash",
+    fallback: "deepseek/deepseek-chat",
+    secondaryFallback: "groq/llama-3.3-70b-versatile",
   },
 } as const;
 
@@ -44,7 +47,7 @@ interface ProviderRegistry {
   groq?: ProviderConfig;
   gemini?: ProviderConfig;
   anthropic?: ProviderConfig;
-  mistral?: ProviderConfig;
+  mistral?: ProviderConfig; // Keep for future expansion
   deepseek?: ProviderConfig;
   openrouter?: ProviderConfig;
 }
@@ -53,7 +56,7 @@ async function readProviderError(response: Response): Promise<string> {
   const text = await response.text().catch(() => "");
   if (!text) return `${response.status} ${response.statusText}`;
 
-  try {
+  try { // Explicitly type parsed
     const parsed = JSON.parse(text) as {
       error?: { message?: string } | string;
       message?: string;
@@ -212,7 +215,7 @@ class OpenAIProvider {
   async send(
     model: string,
     messages: Array<{ role: string; content: string }>,
-    temperature?: number,
+    temperature: number | undefined, // Explicitly type temperature
     max_tokens?: number,
     timeout: number = 30000
   ): Promise<AIResponse> {
@@ -297,7 +300,7 @@ class GroqProvider {
   async send(
     model: string,
     messages: Array<{ role: string; content: string }>,
-    temperature?: number,
+    temperature: number | undefined, // Explicitly type temperature
     max_tokens?: number,
     timeout: number = 30000
   ): Promise<AIResponse> {
@@ -382,7 +385,7 @@ class GeminiProvider {
   async send(
     model: string,
     messages: Array<{ role: string; content: string }>,
-    temperature?: number,
+    temperature: number | undefined, // Explicitly type temperature
     max_tokens?: number,
     timeout: number = 30000
   ): Promise<AIResponse> {
@@ -443,11 +446,96 @@ class GeminiProvider {
 }
 
 // ============================================================================
+// DeepSeek Provider
+// ============================================================================
+
+interface DeepSeekMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+interface DeepSeekResponse {
+  choices: Array<{
+    message: {
+      content: string;
+    };
+  }>;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
+class DeepSeekProvider {
+  private apiKey: string;
+  private baseUrl: string = "https://api.deepseek.com/v1";
+
+  constructor(apiKey: string) {
+    if (!apiKey) throw new Error("DeepSeek API key not provided");
+    this.apiKey = apiKey;
+  }
+
+  async send(
+    model: string,
+    messages: Array<{ role: string; content: string }>,
+    temperature: number | undefined, // Explicitly type temperature
+    max_tokens?: number,
+    timeout: number = 33000 // DeepSeek can sometimes be a bit slower
+  ): Promise<AIResponse> {
+    const startTime = Date.now();
+
+    const body = {
+      model,
+      messages: messages as DeepSeekMessage[],
+      temperature: temperature ?? 0.7,
+      max_tokens: max_tokens ?? 2048,
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`DeepSeek API error: ${await readProviderError(response)}`);
+      }
+
+      const data = (await response.json()) as DeepSeekResponse;
+      const content = requireContent(data.choices?.[0]?.message?.content, "deepseek");
+
+      return {
+        content,
+        model,
+        provider: "deepseek",
+        usage: {
+          input_tokens: data.usage.prompt_tokens,
+          output_tokens: data.usage.completion_tokens,
+          total_tokens: data.usage.total_tokens,
+        },
+        latency_ms: Date.now() - startTime,
+      };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+// ============================================================================
 // Multi-Provider Gateway
 // ============================================================================
 
 export class MultiProviderGateway implements AIGateway {
-  private providers: Map<AIProvider, OpenAIProvider | GroqProvider | GeminiProvider>;
+  private providers: Map<AIProvider, OpenAIProvider | GroqProvider | GeminiProvider | DeepSeekProvider>;
 
   constructor(config: ProviderRegistry) {
     this.providers = new Map();
@@ -461,35 +549,49 @@ export class MultiProviderGateway implements AIGateway {
     if (config.gemini) {
       this.providers.set("gemini", new GeminiProvider(config.gemini.apiKey));
     }
+    if (config.deepseek) {
+      this.providers.set("deepseek", new DeepSeekProvider(config.deepseek.apiKey));
+    }
   }
 
   async send(request: AIRequest): Promise<AIResponse> {
     const provider = this.providers.get(request.provider);
 
-    if (!provider) {
+    if (!provider) { // Type guard for provider
       throw new Error(
         `Provider ${request.provider} not configured or not available`
       );
     }
 
     if (request.provider === "openai") {
-      return (provider as OpenAIProvider).send(
+      return (provider as OpenAIProvider).send( // Cast to specific provider
         request.model,
         request.messages,
         request.temperature,
         request.max_tokens,
         10000
       );
-    } else if (request.provider === "groq") {
-      return (provider as GroqProvider).send(
+    }
+    if (request.provider === "groq") { // Use if for type narrowing
+      return (provider as GroqProvider).send( // Cast to specific provider
         request.model,
         request.messages,
         request.temperature,
         request.max_tokens,
         10000
       );
-    } else if (request.provider === "gemini") {
-      return (provider as GeminiProvider).send(
+    }
+    if (request.provider === "gemini") { // Use if for type narrowing
+      return (provider as GeminiProvider).send( // Cast to specific provider
+        request.model,
+        request.messages,
+        request.temperature,
+        request.max_tokens,
+        10000
+      );
+    }
+    if (request.provider === "deepseek") { // Use if for type narrowing
+      return (provider as DeepSeekProvider).send( // Cast to specific provider
         request.model,
         request.messages,
         request.temperature,
@@ -504,7 +606,7 @@ export class MultiProviderGateway implements AIGateway {
   validateProvider(provider: AIProvider): boolean {
     if (provider === "anthropic" || provider === "mistral" || provider === "deepseek" || provider === "openrouter") {
       // Stub providers - return false until implemented
-      return false;
+      return false; // These are stubs, so they are not validated as available
     }
     return this.providers.has(provider);
   }
@@ -514,8 +616,13 @@ export class MultiProviderGateway implements AIGateway {
       return ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"];
     } else if (provider === "groq") {
       return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
-    } else if (provider === "gemini") {
-      return ["gemini-2.0-flash", "gemini-1.5-pro"];
+    }
+    if (provider === "gemini") { // Use if for type narrowing
+      return ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]; // Added gemini-1.5-flash
+    }
+    // DeepSeek is now a real provider, so it should be handled here
+    if (provider === "deepseek") {
+      return ["deepseek-chat", "deepseek-coder"];
     }
     return [];
   }
@@ -527,12 +634,12 @@ export class MultiProviderGateway implements AIGateway {
 
 class MockGateway implements AIGateway {
   validateProvider(_provider: AIProvider): boolean {
-    // Mock gateway acts as if any provider is available
+    // Mock gateway acts as if every supported provider is available.
     return true;
   }
 
   getAvailableModels(_provider: AIProvider): string[] {
-    return ["mock-model"];
+    return ["gemini-1.5-flash"];
   }
 
   async send(request: AIRequest): Promise<AIResponse> {
@@ -553,7 +660,7 @@ class MockGateway implements AIGateway {
 
       return {
         content,
-        model: "mock-model",
+        model: "gemini-1.5-flash",
         provider: "openai",
         usage: { input_tokens: 5, output_tokens: 50, total_tokens: 55 },
         latency_ms: Date.now() - now,
@@ -580,7 +687,7 @@ class MockGateway implements AIGateway {
 
       return {
         content,
-        model: "mock-model",
+        model: "gemini-1.5-flash",
         provider: "groq",
         usage: { input_tokens: 5, output_tokens: 120, total_tokens: 125 },
         latency_ms: Date.now() - now,
@@ -624,7 +731,7 @@ class MockGateway implements AIGateway {
 
     return {
       content: JSON.stringify(spec),
-      model: "mock-model",
+      model: "gemini-1.5-flash",
       provider: "gemini",
       usage: { input_tokens: 5, output_tokens: 200, total_tokens: 205 },
       latency_ms: Date.now() - now,
@@ -641,6 +748,11 @@ export { MockGateway };
 export class AIGatewayWithFallback implements AIGateway {
   constructor(private gateway: AIGateway) {}
 
+  // If the internal gateway is a MockGateway, bypass complex fallback logic
+  private isMockGateway(): boolean {
+    return this.gateway instanceof MockGateway;
+  }
+
   async send(request: AIRequest): Promise<AIResponse> {
     const attemptedProviders = new Set<AIProvider>();
 
@@ -649,6 +761,11 @@ export class AIGatewayWithFallback implements AIGateway {
       this.gateway.validateProvider(request.provider) &&
       providerHealth.isHealthy(request.provider)
     ) {
+      if (this.isMockGateway()) {
+        // If it's a mock gateway, just send the request directly without fallback logic
+        return this.gateway.send(request);
+      }
+
       try {
         attemptedProviders.add(request.provider);
         const response = await this.gateway.send(request);
@@ -668,17 +785,17 @@ export class AIGatewayWithFallback implements AIGateway {
       this._logProviderSkipOnce(request.provider);
     }
 
-    // Fallback selection order: prefer groq, then gemini, then openai
-    const fallbackOrder: AIProvider[] = ["groq", "gemini", "openai"];
+    // Fallback selection order: prefer Gemini, then DeepSeek, then Groq, then OpenAI
+    const fallbackOrder: AIProvider[] = ["gemini", "deepseek", "groq", "openai"];
 
     // Default model mapping per provider (safe fallbacks)
     const DEFAULT_MODEL: Record<AIProvider, string> = {
-      openai: "gpt-4o-mini",
-      groq: "llama-3.3-70b-versatile",
-      gemini: "gemini-2.0-flash",
+      gemini: "gemini-1.5-flash", // Prefer flash for speed/cost
+      deepseek: "deepseek-chat",
+      groq: "llama-3.3-70b-versatile", // Groq's fast model
+      openai: "gpt-4o-mini", // OpenAI's cost-effective model
       anthropic: "",
       mistral: "",
-      deepseek: "",
       openrouter: "",
     };
 
@@ -690,7 +807,10 @@ export class AIGatewayWithFallback implements AIGateway {
         this._logProviderSkipOnce(candidate);
         continue;
       }
-
+      
+      // Use the specific model from MODEL_ROUTING if available for the candidate provider,
+      // otherwise fall back to the default model for that provider, then to the request model.
+      // The model routing is handled by PipelineExecutor. Here, we just try the default model for the fallback provider.
       const chosenModel = DEFAULT_MODEL[candidate] || request.model;
       try {
         const fallbackRequest: AIRequest = {

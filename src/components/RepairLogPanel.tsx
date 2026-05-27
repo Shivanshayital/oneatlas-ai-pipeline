@@ -1,4 +1,5 @@
 import { RepairLog } from "@/backend/types";
+import type { ReactElement } from "react";
 
 interface RepairLogPanelProps {
   repairs: RepairLog[];
@@ -43,7 +44,7 @@ function groupRepairs(repairs: RepairLog[]): RepairGroup[] {
   return Array.from(groups.values());
 }
 
-function badgeClass(kind: "success" | "partial" | "failed" | "strategy") {
+function badgeClass(kind: "success" | "partial" | "failed" | "strategy"): string {
   const styles = {
     success: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-900",
     partial: "bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-900",
@@ -53,7 +54,7 @@ function badgeClass(kind: "success" | "partial" | "failed" | "strategy") {
   return `rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide ring-1 ${styles[kind]}`;
 }
 
-export default function RepairLogPanel({ repairs }: RepairLogPanelProps) {
+export default function RepairLogPanel({ repairs }: RepairLogPanelProps): ReactElement {
   const groups = groupRepairs(repairs);
 
   return (

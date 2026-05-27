@@ -10,6 +10,19 @@ export function parseJsonSafely(text: string): Record<string, unknown> | null {
   }
 }
 
+export function extractJSON(
+  text: string
+): { success: boolean; data: unknown; error?: string } {
+  const extracted = extractJsonFromText(text);
+  if (!extracted) return { success: false, data: null, error: "No JSON found" };
+
+  try {
+    return { success: true, data: JSON.parse(extracted) };
+  } catch (error) {
+    return { success: false, data: null, error: String(error) };
+  }
+}
+
 export function stringifyJson(obj: unknown): string {
   try {
     return JSON.stringify(obj, null, 2);
@@ -36,7 +49,7 @@ export function calculateTokenCost(
   model: string
 ): number {
   // Approximate token costs (in USD per 1M tokens)
-  const costs: Record<string, { input: number; output: number }> = {
+  const costs: Record<string, { input: number; output: number }> = { // Explicit type
     "gpt-4o": { input: 5, output: 15 },
     "gpt-4o-mini": { input: 0.15, output: 0.6 },
     "gpt-4-turbo": { input: 10, output: 30 },
@@ -96,9 +109,9 @@ export function deepClone<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj));
 }
 
-export function mergeObjects<T extends Record<string, unknown>>(
+export function mergeObjects<T extends Record<string, unknown>>( // Explicit types for parameters
   target: T,
   source: Partial<T>
 ): T {
-  return { ...target, ...source };
+  return { ...target, ...source }; // Return type is T
 }

@@ -2,11 +2,14 @@ import { v4 as uuidv4 } from "uuid";
 import {
   AppIntent,
   DataSchema,
+  DataEntity,
   AppSpec,
   PipelineJob,
   StageEvent,
   JobResult,
   PipelineMetrics,
+  AIProvider, // Import AIProvider
+  RepairLog,
 } from "../types";
 import { MultiProviderGateway, MODEL_ROUTING } from "../ai/gateway";
 import { validationEngine } from "../validation/engine";
@@ -166,22 +169,22 @@ export class PipelineOrchestrator {
   }
 
   private async _runPipeline(prompt: string, jobId: string): Promise<JobResult> {
-    const repairLogs: any[] = [];
+    const repairLogs: RepairLog[] = [];
     const metrics = this.metrics.get(jobId)!;
     const totalStartTime = Date.now();
 
     // ============ Stage 1: Intent Extraction ============
-    this._emitEvent({
+    this._emitEvent({ // Explicit type for event
       type: "stage_start",
       stage: "intent",
       timestamp: new Date().toISOString(),
     });
 
     const intentStartTime = Date.now();
-    let intent = await this._extractIntent(prompt);
+    const intent = await this._extractIntent(prompt);
     metrics.latency.intent_stage_ms = Date.now() - intentStartTime;
 
-    this._emitEvent({
+    this._emitEvent({ // Explicit type for event
       type: "stage_complete",
       stage: "intent",
       timestamp: new Date().toISOString(),
@@ -189,17 +192,17 @@ export class PipelineOrchestrator {
     });
 
     // ============ Stage 2: Schema Generation ============
-    this._emitEvent({
+    this._emitEvent({ // Explicit type for event
       type: "stage_start",
       stage: "schema",
       timestamp: new Date().toISOString(),
     });
 
     const schemaStartTime = Date.now();
-    let schema = await this._generateSchema(intent, prompt);
+    const schema = await this._generateSchema(intent, prompt);
     metrics.latency.schema_stage_ms = Date.now() - schemaStartTime;
 
-    this._emitEvent({
+    this._emitEvent({ // Explicit type for event
       type: "stage_complete",
       stage: "schema",
       timestamp: new Date().toISOString(),
@@ -207,17 +210,17 @@ export class PipelineOrchestrator {
     });
 
     // ============ Stage 3: AppSpec Generation ============
-    this._emitEvent({
+    this._emitEvent({ // Explicit type for event
       type: "stage_start",
       stage: "spec",
       timestamp: new Date().toISOString(),
     });
 
     const specStartTime = Date.now();
-    let spec = await this._generateSpec(intent, schema, prompt);
+    const spec = await this._generateSpec(intent, schema, prompt);
     metrics.latency.spec_stage_ms = Date.now() - specStartTime;
 
-    this._emitEvent({
+    this._emitEvent({ // Explicit type for event
       type: "stage_complete",
       stage: "spec",
       timestamp: new Date().toISOString(),
@@ -235,12 +238,12 @@ export class PipelineOrchestrator {
   }
 
   private async _extractIntent(prompt: string): Promise<AppIntent> {
-    const routingConfig = MODEL_ROUTING.intent;
-    const [provider, model] = routingConfig.primary.split("/");
+    const routingConfig = MODEL_ROUTING.intent; // Explicit type
+    const [provider, model] = routingConfig.primary.split("/") as [AIProvider, string]; // Explicit type
 
     try {
       const response = await this.gateway.send({
-        provider: provider as any,
+        provider,
         model,
         messages: [
           { role: "system", content: INTENT_EXTRACTION_PROMPT },
@@ -256,7 +259,7 @@ export class PipelineOrchestrator {
         response.content
       );
 
-      let intentData: any;
+      let intentData: Record<string, unknown>; // Explicit type
       try {
         intentData = JSON.parse(repairedJson);
       } catch (parseError) {
@@ -292,14 +295,14 @@ export class PipelineOrchestrator {
   }
 
   private async _generateSchema(intent: AppIntent, originalPrompt: string): Promise<DataSchema> {
-    const routingConfig = MODEL_ROUTING.schema;
-    const [provider, model] = routingConfig.primary.split("/");
+    const routingConfig = MODEL_ROUTING.schema; // Explicit type
+    const [provider, model] = routingConfig.primary.split("/") as [AIProvider, string]; // Explicit type
 
     try {
       const intentSummary = `App: ${intent.appName} (${intent.appType})\nFeatures: ${intent.features.join(", ")}\nEntities: ${intent.entities.join(", ")}`;
 
       const response = await this.gateway.send({
-        provider: provider as any,
+        provider,
         model,
         messages: [
           { role: "system", content: SCHEMA_GENERATION_PROMPT },
@@ -314,18 +317,18 @@ export class PipelineOrchestrator {
 
       // Repair
       const { content: repairedJson } = repairEngine.repairStructure("schema", response.content);
-      let schemaData: any;
+      let schemaData: Record<string, unknown>; // Explicit type
       try {
         schemaData = JSON.parse(repairedJson);
       } catch (parseError) {
         throw new Error(`Failed to parse schema JSON: ${String(parseError)}`);
       }
 
-      // Ensure every entity has tenantId
-      if (schemaData.entities && Array.isArray(schemaData.entities)) {
-        for (const entity of schemaData.entities) {
+      // Ensure every entity has tenantId (and id)
+      if (schemaData.entities && Array.isArray(schemaData.entities)) { // Type guard
+        for (const entity of schemaData.entities as DataEntity[]) { // Explicit type for entity
           if (!entity.fields) entity.fields = [];
-          if (!entity.fields.find((f: any) => f.name === "tenantId")) {
+          if (!entity.fields.find((field) => field.name === "tenantId")) {
             entity.fields.unshift({
               name: "tenantId",
               type: "uuid",
@@ -351,15 +354,15 @@ export class PipelineOrchestrator {
     intent: AppIntent,
     schema: DataSchema,
     originalPrompt: string
-  ): Promise<AppSpec> {
-    const routingConfig = MODEL_ROUTING.spec;
-    const [provider, model] = routingConfig.primary.split("/");
+  ): Promise<AppSpec> { // Explicit return type
+    const routingConfig = MODEL_ROUTING.spec; // Explicit type
+    const [provider, model] = routingConfig.primary.split("/") as [AIProvider, string]; // Explicit type
 
     try {
       const schemaJson = JSON.stringify(schema, null, 2);
 
       const response = await this.gateway.send({
-        provider: provider as any,
+        provider,
         model,
         messages: [
           { role: "system", content: SPEC_GENERATION_PROMPT },
@@ -374,7 +377,7 @@ export class PipelineOrchestrator {
 
       // Repair
       const { content: repairedJson } = repairEngine.repairStructure("spec", response.content);
-      let specData: any;
+      let specData: Record<string, unknown>; // Explicit type
       try {
         specData = JSON.parse(repairedJson);
       } catch (parseError) {

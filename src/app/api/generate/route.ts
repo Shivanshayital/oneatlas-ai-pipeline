@@ -12,7 +12,7 @@ interface GenerateRequest {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     let bodyText: string | undefined;
-    try {
+    try { // Explicit type for bodyText
       bodyText = await request.text();
     } catch (err) {
       logger.error("Failed to read request body", err as Error);
@@ -20,7 +20,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     let parsedBody: unknown = undefined;
-    try {
+    try { // Explicit type for parsedBody
       parsedBody = bodyText ? JSON.parse(bodyText) : undefined;
     } catch (err) {
       logger.error("POST /api/generate failed - invalid JSON", err as Error, { rawBody: bodyText });

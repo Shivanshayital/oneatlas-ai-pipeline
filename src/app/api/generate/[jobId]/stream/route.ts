@@ -30,9 +30,9 @@ export async function GET(
     let cleanup: (() => void) | undefined;
 
     const stream = new ReadableStream<Uint8Array>({
-      start(controller: ReadableStreamDefaultController<Uint8Array>) {
+      start(controller: ReadableStreamDefaultController<Uint8Array>): void { // Explicit return type
         const encoder = new TextEncoder();
-        let isClosed = false;
+        let isClosed: boolean = false; // Explicit type
         let didCleanup = false;
         let heartbeatInterval: ReturnType<typeof setInterval> | undefined;
         let closeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -86,7 +86,7 @@ export async function GET(
           }
         };
 
-        cleanup = () => {
+        cleanup = (): void => { // Explicit return type
           isClosed = true;
           cleanupOnce();
         };
@@ -105,7 +105,7 @@ export async function GET(
         }
 
         // Register for live events
-        unsubscribe = jobStore.addEventListener(jobId, (event) => {
+        unsubscribe = jobStore.addEventListener(jobId, (event: StageEvent) => { // Explicit type for event
           const message = formatSSEMessage(event);
           safeEnqueue(message);
 
@@ -122,8 +122,8 @@ export async function GET(
           safeEnqueue(": heartbeat\n\n");
         }, 30000);
       },
-      cancel() {
-        cleanup?.();
+      cancel(): void {
+        cleanup?.(); // Call cleanup if it exists
         cleanup = undefined;
       },
     });
@@ -138,7 +138,7 @@ export async function GET(
       },
     });
   } catch (error) {
-    logger.error("GET /api/generate/:jobId/stream failed", error as Error);
+    logger.error("GET /api/generate/:jobId/stream failed", error as Error); // Explicit cast
     return NextResponse.json(
       { error: "Failed to stream job updates" },
       { status: 500 }

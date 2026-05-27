@@ -21,7 +21,7 @@ export class Logger {
     level: LogLevel,
     message: string,
     context?: Record<string, unknown>,
-    error?: Error
+    error?: Error // Explicit type for error
   ): void {
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),

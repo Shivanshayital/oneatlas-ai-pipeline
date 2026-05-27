@@ -1,4 +1,5 @@
 import { AppSpec } from "@/backend/types";
+import type { ReactElement } from "react";
 
 interface AppSpecViewerProps {
   spec?: AppSpec;
@@ -16,7 +17,7 @@ function methodClass(method: string): string {
   return `rounded-md px-2 py-1 text-[11px] font-semibold ring-1 ${METHOD_STYLES[method] ?? METHOD_STYLES.GET}`;
 }
 
-export default function AppSpecViewer({ spec }: AppSpecViewerProps) {
+export default function AppSpecViewer({ spec }: AppSpecViewerProps): ReactElement {
   if (!spec) {
     return (
       <section className="rounded-xl border border-dashed border-slate-300 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-950">

@@ -1,10 +1,13 @@
 import { Integration } from "@/backend/types";
+import type { ReactElement } from "react";
 
 interface IntegrationRegistryPanelProps {
   integrations: Integration[];
 }
 
-export default function IntegrationRegistryPanel({ integrations }: IntegrationRegistryPanelProps) {
+export default function IntegrationRegistryPanel({
+  integrations,
+}: IntegrationRegistryPanelProps): ReactElement {
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-950">
       <div className="flex items-center justify-between gap-4">

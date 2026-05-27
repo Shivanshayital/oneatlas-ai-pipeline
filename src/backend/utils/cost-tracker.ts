@@ -11,10 +11,10 @@ export interface CostEntry {
 }
 
 export interface TotalMetrics {
-  total_input_tokens: number;
-  total_output_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
   total_tokens: number;
-  total_cost_usd: number;
+  estimated_cost: number;
   entries: CostEntry[];
 }
 
@@ -74,10 +74,10 @@ export class CostTracker {
     );
 
     return {
-      total_input_tokens: totals.input,
-      total_output_tokens: totals.output,
+      input_tokens: totals.input,
+      output_tokens: totals.output,
       total_tokens: totals.input + totals.output,
-      total_cost_usd: Math.round(totals.cost * 10000) / 10000, // Round to 4 decimals
+      estimated_cost: Math.round(totals.cost * 10000) / 10000,
       entries: this.entries,
     };
   }

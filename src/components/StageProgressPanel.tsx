@@ -1,4 +1,5 @@
 import { StageEvent, PipelineStage, ProviderUsage } from "@/backend/types";
+import type { ReactElement } from "react";
 
 interface StageProgressPanelProps {
   events: StageEvent[];
@@ -18,7 +19,19 @@ function formatDuration(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function stageState(stage: PipelineStage, events: StageEvent[], status: string, providerHistory?: ProviderUsage[]) {
+function stageState(
+  stage: PipelineStage,
+  events: StageEvent[],
+  status: string,
+  providerHistory?: ProviderUsage[]
+): {
+  state: string;
+  duration?: number;
+  provider?: string;
+  model?: string;
+  tokens?: ProviderUsage["tokens"];
+  error?: string;
+} {
   const stageEvents = events.filter((event) => event.stage === stage);
   const started = stageEvents.find((event) => event.type === "stage_start");
   const completed = [...stageEvents].reverse().find((event) => event.type === "stage_complete");
@@ -46,12 +59,12 @@ function stageState(stage: PipelineStage, events: StageEvent[], status: string, 
     duration: startedAt && endedAt ? endedAt - startedAt : undefined,
     provider: providerEvent?.data?.provider ? String(providerEvent.data.provider) : latestUsage?.provider,
     model: providerEvent?.data?.model ? String(providerEvent.data.model) : latestUsage?.model,
-    tokens: latestUsage?.tokens_normalized,
+    tokens: latestUsage?.tokens,
     error: failed?.error,
   };
 }
 
-function stateBadge(state: string) {
+function stateBadge(state: string): ReactElement {
   const styles: Record<string, string> = {
     complete: "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950 dark:text-emerald-300",
     running: "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/60 dark:bg-sky-950 dark:text-sky-300",
@@ -73,7 +86,11 @@ function stateBadge(state: string) {
   );
 }
 
-export default function StageProgressPanel({ events, status, providerHistory }: StageProgressPanelProps) {
+export default function StageProgressPanel({
+  events,
+  status,
+  providerHistory,
+}: StageProgressPanelProps): ReactElement {
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-950">
       <div className="flex items-center justify-between gap-4">
@@ -117,10 +134,10 @@ export default function StageProgressPanel({ events, status, providerHistory }: 
                     )}
                     {current.tokens ? (
                       <div className="mt-3 flex items-center gap-2">
-                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">P:{current.tokens.promptTokens}</span>
-                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">C:{current.tokens.completionTokens}</span>
-                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">T:{current.tokens.totalTokens}</span>
-                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">${current.tokens.estimatedCost.toFixed(4)}</span>
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">P:{current.tokens.input_tokens}</span>
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">C:{current.tokens.output_tokens}</span>
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">T:{current.tokens.total_tokens}</span>
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">${current.tokens.estimated_cost.toFixed(4)}</span>
                       </div>
                     ) : null}
                   </div>

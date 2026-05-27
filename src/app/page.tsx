@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { ReactElement } from "react";
 import PromptInput from "@/components/PromptInput";
 import StageProgressPanel from "@/components/StageProgressPanel";
 import AppSpecViewer from "@/components/AppSpecViewer";
-import RepairLogPanel from "@/components/RepairLogPanel";
+import ProviderUsageDashboard from "@/components/ProviderUsageDashboard";
 import IntegrationRegistryPanel from "@/components/IntegrationRegistryPanel";
 import type {
   AppSpec,
@@ -12,10 +13,11 @@ import type {
   RepairLog,
   Integration,
   PipelineMetrics,
+  ProviderUsageSummary,
   ProviderUsage,
 } from "@/backend/types";
 
-export default function HomePage() {
+export default function HomePage(): ReactElement {
   const [jobId, setJobId] = useState<string | null>(null);
   const [status, setStatus] = useState("idle");
   const [events, setEvents] = useState<StageEvent[]>([]);
@@ -24,6 +26,7 @@ export default function HomePage() {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [metrics, setMetrics] = useState<PipelineMetrics | null>(null);
   const [providerHistory, setProviderHistory] = useState<ProviderUsage[]>([]);
+  const [providerUsageSummary, setProviderUsageSummary] = useState<ProviderUsageSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -41,7 +44,7 @@ export default function HomePage() {
     };
   }, []);
 
-  const fetchJobDetails = async (id: string) => {
+  const fetchJobDetails = async (id: string): Promise<void> => {
     try {
       const response = await fetch(`/api/generate/${id}`);
       const data = await response.json();
@@ -49,6 +52,7 @@ export default function HomePage() {
       setRepairs(Array.isArray(data.repairs) ? data.repairs : []);
       setMetrics(data.metrics ?? null);
       setProviderHistory(Array.isArray(data.provider_history) ? data.provider_history : []);
+      setProviderUsageSummary(data.provider_usage_summary ?? null);
       setSpec((data.result?.spec as AppSpec) ?? null);
 
       if (data.error) {
@@ -59,7 +63,7 @@ export default function HomePage() {
     }
   };
 
-  const subscribeToSse = (id: string) => {
+  const subscribeToSse = (id: string): void => {
     eventSourceRef.current?.close();
     const source = new EventSource(`/api/generate/${id}/stream`);
     eventSourceRef.current = source;
@@ -90,9 +94,10 @@ export default function HomePage() {
       const payload = JSON.parse((event as MessageEvent).data) as StageEvent;
       setEvents((prev) => [...prev, payload]);
       // Append provider usage to local history for live UI updates
-      const providerUsage = (payload.data as any)?.provider_usage as ProviderUsage | undefined;
+      const providerUsage = payload.data?.provider_usage as ProviderUsage | undefined;
       if (providerUsage) {
         setProviderHistory((prev) => [...prev, providerUsage]);
+        // Optionally, update a live summary here if needed, or rely on fetchJobDetails at completion
       }
     });
 
@@ -126,7 +131,7 @@ export default function HomePage() {
     };
   };
 
-  const handleSubmit = async (prompt: string) => {
+  const handleSubmit = async (prompt: string): Promise<void> => {
     setErrorMessage(null);
     setIsExecuting(true);
     setEvents([]);
@@ -134,6 +139,7 @@ export default function HomePage() {
     setSpec(null);
     setMetrics(null);
     setProviderHistory([]);
+    setProviderUsageSummary(null);
     setStatus("pending");
 
     try {
@@ -180,7 +186,7 @@ export default function HomePage() {
           </div>
 
           <div className="space-y-6">
-            <RepairLogPanel repairs={repairs} />
+            <ProviderUsageDashboard providerUsageSummary={providerUsageSummary} providerHistory={providerHistory} />
             <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-950">
               <h2 className="text-base font-semibold text-slate-950 dark:text-slate-50">Execution Summary</h2>
               <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-1">
@@ -188,10 +194,10 @@ export default function HomePage() {
                 <SummaryItem label="Status" value={status} />
                 <SummaryItem label="Total latency" value={metrics ? `${(metrics.latency.total_ms / 1000).toFixed(1)}s` : "--"} />
                 <SummaryItem label="Repairs" value={String(repairs.length)} />
-                <SummaryItem label="Cost" value={metrics ? `$${(metrics.tokens_normalized?.estimatedCost ?? metrics.tokens.estimated_cost).toFixed(4)}` : "--"} />
-                <SummaryItem label="Tokens" value={metrics ? ((metrics.tokens_normalized?.totalTokens ?? metrics.tokens.total_tokens).toLocaleString()) : "--"} />
-                <SummaryItem label="Prompt" value={metrics ? String(metrics.tokens_normalized?.promptTokens ?? metrics.tokens.input_tokens) : "--"} mono />
-                <SummaryItem label="Completion" value={metrics ? String(metrics.tokens_normalized?.completionTokens ?? metrics.tokens.output_tokens) : "--"} mono />
+                <SummaryItem label="Cost" value={metrics ? `$${metrics.tokens.estimated_cost.toFixed(4)}` : "--"} />
+                <SummaryItem label="Tokens" value={metrics ? metrics.tokens.total_tokens.toLocaleString() : "--"} />
+                <SummaryItem label="Prompt" value={metrics ? String(metrics.tokens.input_tokens) : "--"} mono />
+                <SummaryItem label="Completion" value={metrics ? String(metrics.tokens.output_tokens) : "--"} mono />
                 <SummaryItem
                   label="Provider"
                   value={providerHistory.at(-1)?.provider ?? "--"}
@@ -225,7 +231,7 @@ function SummaryItem({
   label: string;
   value: string;
   mono?: boolean;
-}) {
+}): ReactElement {
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-900/70">
       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</p>

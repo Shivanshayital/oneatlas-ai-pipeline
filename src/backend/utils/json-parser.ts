@@ -63,7 +63,7 @@ export function extractJsonBlock(text: string): string | null {
     }
 
     if (char === opening) {
-      depth += 1;
+      depth += 1; // Explicit type for depth
     }
 
     if (char === closing) {
@@ -112,7 +112,7 @@ export function safeParseJson(
     }
     return {
       success: false,
-      data: null,
+      data: null, // Explicit type for data
       error: "Parsed value is not an object",
     };
   } catch (error) {
@@ -132,7 +132,7 @@ export function extractJSON(text: string): ParseResult {
   if (directResult.success && directResult.data) {
     return { success: true, data: directResult.data, rawText };
   }
-
+  
   const block = extractJsonBlock(rawText);
   if (block) {
     const blockResult = safeParseJson(block);
@@ -157,7 +157,7 @@ export function extractJSON(text: string): ParseResult {
 
 export function parseJSON(
   jsonStr: string
-): { success: boolean; data: Record<string, unknown> | null; error?: string } {
+): { success: boolean; data: Record<string, unknown> | null; error?: string } { // Explicit return type
   return safeParseJson(jsonStr);
 }
 

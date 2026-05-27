@@ -132,6 +132,11 @@ export interface StageEvent {
   stage: PipelineStage;
   timestamp: string;
   data?: Record<string, unknown>;
+  latency_ms?: number;
+  provider?: AIProvider;
+  model?: string;
+  tokens?: TokenMetrics;
+  cost_usd?: number;
   error?: string;
 }
 
@@ -140,14 +145,7 @@ export interface ProviderUsage {
   provider: AIProvider;
   model: string;
   latency_ms: number;
-  tokens: TokenMetrics;
-  // Normalized camelCase token usage for frontend display
-  tokens_normalized?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-    estimatedCost: number;
-  };
+  tokens: TokenMetrics; // Use the standard TokenMetrics
   cost_usd: number;
   attempt: number;
   timestamp: string;
@@ -230,6 +228,7 @@ export interface AIRequest {
   messages: AIMessage[];
   temperature?: number;
   max_tokens?: number;
+  stage?: PipelineStage; // Added for more granular fallback logic in gateway
 }
 
 export interface AIResponse {
@@ -288,14 +287,24 @@ export interface LatencyMetrics {
 
 export interface PipelineMetrics {
   tokens: TokenMetrics;
-  // Optional normalized tokens for UI convenience
-  tokens_normalized?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-    estimatedCost: number;
-  };
+  tokens_normalized?: TokenMetrics;
   latency: LatencyMetrics;
   repair_attempts: number;
   successful_repairs: number;
 }
+
+export interface ProviderUsageSummaryItem {
+  provider: AIProvider;
+  model?: string; // Last used model for this provider
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  latencyMs: number; // Average latency
+  status: "active" | "healthy" | "unhealthy" | "cooldown";
+  estimatedRemainingQuota: number;
+  quotaStatus: 'low' | 'medium' | 'high' | 'near_limit' | 'unknown';
+  failures: number;
+}
+export type ProviderUsageSummary = Record<AIProvider, ProviderUsageSummaryItem>;

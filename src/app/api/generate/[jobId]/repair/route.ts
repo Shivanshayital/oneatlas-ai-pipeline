@@ -3,6 +3,7 @@ import { jobStore } from "@/backend/store/job-store";
 import { repairEngine } from "@/backend/repair/engine";
 import { validationEngine } from "@/backend/validation/engine";
 import { logger } from "@/backend/logging/logger";
+import type { DataSchema } from "@/backend/types";
 
 interface Params {
   jobId: string;
@@ -43,7 +44,7 @@ export async function POST(
     }
 
     // Get stage output
-    const stageOutput = jobStore.getStageOutput(jobId, stage);
+    const stageOutput: unknown = jobStore.getStageOutput(jobId, stage); // Explicit type
     if (!stageOutput) {
       return NextResponse.json(
         { error: `No output for stage: ${stage}` },
@@ -52,7 +53,7 @@ export async function POST(
     }
 
     // Repair based on strategy
-    let repairedData: Record<string, unknown> = stageOutput as Record<string, unknown>;
+    let repairedData: Record<string, unknown> = stageOutput as Record<string, unknown>; // Explicit type
     const repairs: Array<{ strategy: string; action: string; outcome: string }> = [];
 
     if (!strategy || strategy === "structural_repair") {
@@ -70,7 +71,7 @@ export async function POST(
             });
           }
         } catch (parseError) {
-          return NextResponse.json(
+          return NextResponse.json( // Explicit type for parseError
             { error: "Structural repair failed: Invalid JSON" },
             { status: 400 }
           );
@@ -97,9 +98,9 @@ export async function POST(
     }
 
     if (!strategy || strategy === "consistency_repair") {
-      const schema = jobStore.getStageOutput(jobId, "schema");
+      const schema = jobStore.getStageOutput(jobId, "schema") as DataSchema | null;
       const { data: consistencyRepaired, logs: consistencyLogs } =
-        repairEngine.repairConsistency(stage, repairedData, schema as any);
+        repairEngine.repairConsistency(stage, repairedData, schema);
       repairedData = consistencyRepaired;
       for (const log of consistencyLogs) {
         jobStore.addRepair(jobId, log);
@@ -145,7 +146,7 @@ export async function POST(
       data: repairedData,
     });
   } catch (error) {
-    logger.error("POST /api/generate/:jobId/repair failed", error as Error);
+    logger.error("POST /api/generate/:jobId/repair failed", error as Error); // Explicit cast
     return NextResponse.json(
       { error: "Repair failed" },
       { status: 500 }

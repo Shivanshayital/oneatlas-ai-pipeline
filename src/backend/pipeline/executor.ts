@@ -1,15 +1,17 @@
 import {
   AppIntent,
   DataSchema,
+  DataEntity,
   AppSpec,
   AIMessage,
   JobResult,
+  TokenMetrics, // Import TokenMetrics
   LatencyMetrics,
   AIProvider,
   AIResponse,
   PipelineMetrics,
   PipelineStage,
-} from "../types";
+} from "../types/index";
 import { AIGateway, MODEL_ROUTING } from "../ai/gateway";
 import { validationEngine } from "../validation/engine";
 import { repairEngine } from "../repair/engine";
@@ -18,8 +20,8 @@ import {
   DataSchemaSchema,
   AppSpecSchema,
 } from "../schemas";
-import { extractJSON } from "../utils/json-parser";
-import { CostTracker } from "../utils/cost-tracker";
+import { extractJSON } from "../utils/helpers";
+import { CostTracker } from "../ai/cost-tracker";
 import { jobStore } from "../store/job-store";
 import { logger } from "../logging/logger";
 import {
@@ -154,16 +156,10 @@ export class PipelineExecutor {
     const repairs = jobStore.getRepairs(jobId);
     const metrics: PipelineMetrics = {
       tokens: {
-        input_tokens: totals.total_input_tokens,
-        output_tokens: totals.total_output_tokens,
+        input_tokens: totals.input_tokens,
+        output_tokens: totals.output_tokens,
         total_tokens: totals.total_tokens,
-        estimated_cost: totals.total_cost_usd,
-      },
-      tokens_normalized: {
-        promptTokens: totals.total_input_tokens,
-        completionTokens: totals.total_output_tokens,
-        totalTokens: totals.total_tokens,
-        estimatedCost: totals.total_cost_usd,
+        estimated_cost: totals.estimated_cost, // Use the standard TokenMetrics
       },
       latency: this.latencyMetrics,
       repair_attempts: repairs.length,
@@ -198,13 +194,7 @@ export class PipelineExecutor {
         input_tokens: response.usage.input_tokens,
         output_tokens: response.usage.output_tokens,
         total_tokens: response.usage.total_tokens,
-        estimated_cost: cost,
-      },
-      tokens_normalized: {
-        promptTokens: response.usage.input_tokens,
-        completionTokens: response.usage.output_tokens,
-        totalTokens: response.usage.total_tokens,
-        estimatedCost: cost,
+        estimated_cost: cost, // Use the standard TokenMetrics
       },
       cost_usd: cost,
       attempt,
@@ -231,27 +221,34 @@ export class PipelineExecutor {
     this._updateMetrics(jobId);
   }
 
-  private async _sendWithRetry(
+  private async _sendWithRetry( // Explicit return type
     jobId: string,
     stage: PipelineStage,
-    primaryRoute: string,
-    fallbackRoute: string,
+    _primaryRoute: string,
+    _fallbackRoute: string,
     messages: AIMessage[],
     temperature: number,
     max_tokens: number
-  ): Promise<AIResponse> {
-    const routes = [primaryRoute, fallbackRoute];
+  ): Promise<AIResponse> { // Explicit return type
+    const modelRoutingConfig = MODEL_ROUTING[stage as keyof typeof MODEL_ROUTING];
+    const routes = [
+      modelRoutingConfig.primary,
+      modelRoutingConfig.fallback,
+      modelRoutingConfig.secondaryFallback, // Add secondary fallback
+    ].filter(Boolean) as string[]; // Filter out undefined/null
+
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < routes.length; attempt += 1) {
       const [provider, model] = routes[attempt].split("/") as [AIProvider, string];
       try {
         const response = await this.gateway.send({
-          provider,
-          model,
+          provider, // The actual provider to use
+          model, // The actual model to use
           messages,
           temperature,
           max_tokens,
+          stage, // Pass stage to gateway for more granular fallback logic
         });
 
         this._recordProviderUsage(
@@ -308,7 +305,7 @@ export class PipelineExecutor {
     throw lastError ?? new Error("Unknown gateway failure");
   }
 
-  async executePipeline(jobId: string, prompt: string): Promise<void> {
+  async executePipeline(jobId: string, prompt: string): Promise<void> { // Explicit return type
     const totalStartTime = Date.now();
 
     try {
@@ -349,13 +346,7 @@ export class PipelineExecutor {
         data: {
           metrics: {
             latency: this.latencyMetrics,
-            tokens: totals,
-            tokens_normalized: {
-              promptTokens: totals.total_input_tokens,
-              completionTokens: totals.total_output_tokens,
-              totalTokens: totals.total_tokens,
-              estimatedCost: totals.total_cost_usd,
-            },
+            tokens: totals as TokenMetrics, // Cast to TokenMetrics
           },
         },
       });
@@ -363,7 +354,7 @@ export class PipelineExecutor {
       logger.info("Pipeline execution completed", {
         jobId,
         totalTime: this.latencyMetrics.total_ms,
-        cost: this.costTracker.getTotals().total_cost_usd,
+        cost: this.costTracker.getTotals().estimated_cost,
       });
     } catch (error) {
       const errorMsg = String(error);
@@ -379,12 +370,13 @@ export class PipelineExecutor {
     }
   }
 
-  private async _executeIntentStage(jobId: string, prompt: string): Promise<AppIntent> {
+  private async _executeIntentStage(jobId: string, prompt: string): Promise<AppIntent> { // Explicit return type
     jobStore.addEvent(jobId, {
       type: "stage_start",
       stage: "intent",
       timestamp: new Date().toISOString(),
     });
+    const stageStartTime = Date.now();
 
     try {
       const primaryRoute = MODEL_ROUTING.intent.primary;
@@ -410,7 +402,7 @@ export class PipelineExecutor {
           { role: "system", content: INTENT_EXTRACTION_PROMPT },
           { role: "user", content: prompt },
         ],
-        0.3,
+        0.3, // Lower temperature for more deterministic intent extraction
         1024
       );
 
@@ -465,6 +457,7 @@ export class PipelineExecutor {
         type: "stage_complete",
         stage: "intent",
         timestamp: new Date().toISOString(),
+        latency_ms: Date.now() - stageStartTime,
         data: { intent },
       });
 
@@ -481,7 +474,7 @@ export class PipelineExecutor {
     }
   }
 
-  private async _executeSchemaStage(
+  private async _executeSchemaStage( // Explicit return type
     jobId: string,
     intent: AppIntent,
     prompt: string
@@ -491,6 +484,7 @@ export class PipelineExecutor {
       stage: "schema",
       timestamp: new Date().toISOString(),
     });
+    const stageStartTime = Date.now();
 
     try {
       const primaryRoute = MODEL_ROUTING.schema.primary;
@@ -521,7 +515,7 @@ export class PipelineExecutor {
             content: `Original user request: "${prompt}"\n\nExtracted intent:\n${intentSummary}`,
           },
         ],
-        0.4,
+        0.4, // Slightly higher temperature for creativity in schema generation
         2048
       );
 
@@ -533,12 +527,12 @@ export class PipelineExecutor {
       const schemaData = extractResult.data as Record<string, unknown>;
 
       // Ensure every entity has tenantId
-      if (schemaData.entities && Array.isArray(schemaData.entities)) {
-        for (const entity of schemaData.entities as any[]) {
+      if (schemaData.entities && Array.isArray(schemaData.entities)) { // Type guard
+        for (const entity of schemaData.entities as DataEntity[]) { // Explicit type for entity
           if (!entity.fields) entity.fields = [];
-
+          
           // Add id if missing
-          if (!entity.fields.find((f: any) => f.name === "id")) {
+          if (!entity.fields.find((field) => field.name === "id")) {
             entity.fields.unshift({
               name: "id",
               type: "uuid",
@@ -546,8 +540,8 @@ export class PipelineExecutor {
             });
           }
 
-          // Add tenantId if missing
-          if (!entity.fields.find((f: any) => f.name === "tenantId")) {
+          // Add tenantId if missing (ensure it's not already there)
+          if (!entity.fields.find((field) => field.name === "tenantId")) {
             entity.fields.splice(1, 0, {
               name: "tenantId",
               type: "uuid",
@@ -588,6 +582,7 @@ export class PipelineExecutor {
         type: "stage_complete",
         stage: "schema",
         timestamp: new Date().toISOString(),
+        latency_ms: Date.now() - stageStartTime,
         data: { entity_count: schema.entities.length },
       });
 
@@ -604,7 +599,7 @@ export class PipelineExecutor {
     }
   }
 
-  private async _executeSpecStage(
+  private async _executeSpecStage( // Explicit return type
     jobId: string,
     intent: AppIntent,
     schema: DataSchema,
@@ -615,6 +610,7 @@ export class PipelineExecutor {
       stage: "spec",
       timestamp: new Date().toISOString(),
     });
+    const stageStartTime = Date.now();
 
     try {
       const primaryRoute = MODEL_ROUTING.spec.primary;
@@ -645,7 +641,7 @@ export class PipelineExecutor {
             content: `Original request: "${prompt}"\n\nSchema to implement:\n${schemaJson}`,
           },
         ],
-        0.4,
+        0.4, // Moderate temperature for balanced creativity and adherence to schema
         4096
       );
 
@@ -713,6 +709,7 @@ export class PipelineExecutor {
         type: "stage_complete",
         stage: "spec",
         timestamp: new Date().toISOString(),
+        latency_ms: Date.now() - stageStartTime,
         data: {
           pages: spec.pages.length,
           endpoints: spec.api_endpoints.length,
@@ -733,7 +730,7 @@ export class PipelineExecutor {
     }
   }
 
-  private _ensureMinimumSpec(
+  private _ensureMinimumSpec( // Explicit return type
     specData: Record<string, unknown>,
     intent: AppIntent,
     schema: DataSchema
@@ -751,7 +748,7 @@ export class PipelineExecutor {
         created_at: new Date().toISOString(),
       };
     } else {
-      const metadata = specData.metadata as Record<string, unknown>;
+        const metadata = specData.metadata as Record<string, unknown>; // Explicit type
       metadata.app_name = typeof metadata.app_name === "string" ? metadata.app_name : intent.appName;
       metadata.app_type = intent.appType;
       metadata.version = typeof metadata.version === "string" ? metadata.version : "1.0.0";
@@ -808,7 +805,7 @@ export class PipelineExecutor {
     );
   }
 
-  private _normalizeAppType(prompt: string, rawType: string): AppIntent["appType"] {
+  private _normalizeAppType(prompt: string, rawType: string): AppIntent["appType"] { // Explicit return type
     const text = `${prompt} ${rawType}`.toLowerCase();
     if (/\b(crm|deal|deals|lead|leads|pipeline|customer|sales)\b/.test(text)) return "crm";
     if (/\b(task|tasks|project|projects|sprint|engineering team|kanban)\b/.test(text)) return "project_management";
@@ -819,7 +816,7 @@ export class PipelineExecutor {
     return "custom";
   }
 
-  private _selectWorkflowEntity(schema: DataSchema, integrationId: string): string {
+  private _selectWorkflowEntity(schema: DataSchema, integrationId: string): string { // Explicit return type
     const entityNames = schema.entities.map((entity) => entity.name);
     const preferredByIntegration: Record<string, string[]> = {
       whatsapp: ["Deal", "Lead", "Customer", "Task", "Order"],
@@ -833,7 +830,7 @@ export class PipelineExecutor {
     return preferred.find((name) => entityNames.includes(name)) ?? entityNames[0] ?? "Entity";
   }
 
-  private _ensureIntegrationHooks(
+  private _ensureIntegrationHooks( // Explicit return type
     hooks: Array<Record<string, unknown>>,
     requestedIntegrations: string[],
     schema: DataSchema
@@ -857,7 +854,7 @@ export class PipelineExecutor {
       nextHooks.push({
         integration_id: integrationId,
         trigger,
-        action,
+        action: action, // Ensure action is string
         entity_mapping: {
           entity,
         },
@@ -876,7 +873,7 @@ export class PipelineExecutor {
     });
   }
 
-  private _ensureIntegrationWorkflows(
+  private _ensureIntegrationWorkflows( // Explicit return type
     workflows: Array<Record<string, unknown>>,
     requestedIntegrations: string[],
     schema: DataSchema,
@@ -887,7 +884,7 @@ export class PipelineExecutor {
     for (const integrationId of requestedIntegrations) {
       const hook = hooks.find((candidate) => candidate.integration_id === integrationId);
       if (!hook) continue;
-
+      
       const entity = this._selectWorkflowEntity(schema, integrationId);
       const relatedWorkflow = nextWorkflows.find((workflow) => {
         const name = String(workflow.name ?? "").toLowerCase();
@@ -902,7 +899,7 @@ export class PipelineExecutor {
 
       if (relatedWorkflow) {
         const steps = Array.isArray(relatedWorkflow.steps)
-          ? (relatedWorkflow.steps as Array<Record<string, unknown>>)
+          ? (relatedWorkflow.steps as Array<Record<string, unknown>>) // Explicit type
           : [];
         const hasIntegrationStep = steps.some((step) => step.integration_id === integrationId);
         if (!hasIntegrationStep) {
@@ -952,12 +949,12 @@ export class PipelineExecutor {
     });
   }
 
-  private _entityFromText(text: string, schema: DataSchema): string | undefined {
+  private _entityFromText(text: string, schema: DataSchema): string | undefined { // Explicit return type
     const normalized = text.toLowerCase();
     return schema.entities.find((entity) => normalized.includes(entity.name.toLowerCase()))?.name;
   }
 
-  private _titleCase(value: string): string {
+  private _titleCase(value: string): string { // Explicit return type
     return value
       .replace(/[_-]+/g, " ")
       .replace(/\b\w/g, (char) => char.toUpperCase());
