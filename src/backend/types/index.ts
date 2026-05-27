@@ -119,11 +119,39 @@ export interface StageEvent {
     | "stage_start"
     | "stage_complete"
     | "stage_failed"
+    | "stage_retry"
     | "generation_complete";
   stage: PipelineStage;
   timestamp: string;
   data?: Record<string, unknown>;
   error?: string;
+}
+
+export interface ProviderUsage {
+  stage: PipelineStage;
+  provider: AIProvider;
+  model: string;
+  latency_ms: number;
+  tokens: TokenMetrics;
+  cost_usd: number;
+  attempt: number;
+  timestamp: string;
+}
+
+export interface RetryEntry {
+  stage: PipelineStage;
+  attempt: number;
+  provider: AIProvider;
+  model: string;
+  error: string;
+  timestamp: string;
+}
+
+export interface ValidationSnapshot {
+  stage: PipelineStage;
+  valid: boolean;
+  errors: ValidationError[];
+  timestamp: string;
 }
 
 export interface JobResult {

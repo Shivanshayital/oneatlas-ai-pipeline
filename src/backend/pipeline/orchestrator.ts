@@ -6,8 +6,6 @@ import {
   PipelineJob,
   StageEvent,
   JobResult,
-  LatencyMetrics,
-  TokenMetrics,
   PipelineMetrics,
 } from "../types";
 import { MultiProviderGateway, MODEL_ROUTING } from "../ai/gateway";
@@ -237,8 +235,6 @@ export class PipelineOrchestrator {
   }
 
   private async _extractIntent(prompt: string): Promise<AppIntent> {
-    const startTime = Date.now();
-
     const routingConfig = MODEL_ROUTING.intent;
     const [provider, model] = routingConfig.primary.split("/");
 
@@ -255,7 +251,7 @@ export class PipelineOrchestrator {
       });
 
       // Repair structural issues
-      const { content: repairedJson, logs: structuralLogs } = repairEngine.repairStructure(
+      const { content: repairedJson } = repairEngine.repairStructure(
         "intent",
         response.content
       );
@@ -276,7 +272,7 @@ export class PipelineOrchestrator {
         "integrations_requested",
         "assumptions",
       ];
-      const { data: repairedData, logs: fieldLogs } = repairEngine.repairFields(
+      const { data: repairedData } = repairEngine.repairFields(
         "intent",
         intentData,
         requiredFields

@@ -123,10 +123,7 @@ export const AppSpecSchema = z.object({
     .array(ApiEndpointSchema)
     .min(1)
     .refine(
-      (endpoints) => {
-        const pagePaths = new Set<string>();
-        return true; // Validation happens in repair engine
-      },
+      () => true,
       "API endpoints must be consistent with pages"
     ),
   auth_rules: z.array(AuthRuleSchema),

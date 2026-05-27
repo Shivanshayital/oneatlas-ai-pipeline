@@ -327,10 +327,8 @@ class GeminiProvider {
 
 export class MultiProviderGateway implements AIGateway {
   private providers: Map<AIProvider, OpenAIProvider | GroqProvider | GeminiProvider>;
-  private config: ProviderRegistry;
 
   constructor(config: ProviderRegistry) {
-    this.config = config;
     this.providers = new Map();
 
     if (config.openai) {
@@ -403,6 +401,119 @@ export class MultiProviderGateway implements AIGateway {
 }
 
 // ============================================================================
+// Mock Gateway (development / demo mode)
+// ============================================================================
+
+class MockGateway implements AIGateway {
+  validateProvider(_provider: AIProvider): boolean {
+    // Mock gateway acts as if any provider is available
+    return true;
+  }
+
+  getAvailableModels(_provider: AIProvider): string[] {
+    return ["mock-model"];
+  }
+
+  async send(request: AIRequest): Promise<AIResponse> {
+    // Determine stage heuristically from system prompt
+    const system = request.messages.find((m) => m.role === "system")?.content ?? "";
+
+    const now = Date.now();
+
+    if (system.includes("Extract the app intent")) {
+      const content = JSON.stringify({
+        appName: "Mock Task Manager",
+        appType: "web",
+        features: ["tasks", "assignments", "notifications"],
+        entities: ["Task", "User"],
+        integrations_requested: ["slack"],
+        assumptions: ["users are internal"]
+      });
+
+      return {
+        content,
+        model: "mock-model",
+        provider: "openai",
+        usage: { input_tokens: 5, output_tokens: 50, total_tokens: 55 },
+        latency_ms: Date.now() - now,
+      };
+    }
+
+    if (system.includes("Generate a complete data schema")) {
+      const content = JSON.stringify({
+        schema_version: "1.0.0",
+        entities: [
+          {
+            name: "Task",
+            tableName: "tasks",
+            fields: [
+              { name: "id", type: "uuid", required: true },
+              { name: "tenantId", type: "uuid", required: true },
+              { name: "title", type: "string", required: true },
+              { name: "dueDate", type: "date", required: false }
+            ],
+            relations: []
+          }
+        ]
+      });
+
+      return {
+        content,
+        model: "mock-model",
+        provider: "groq",
+        usage: { input_tokens: 5, output_tokens: 120, total_tokens: 125 },
+        latency_ms: Date.now() - now,
+      };
+    }
+
+    // Default: spec generation
+    const spec = {
+      metadata: {
+        app_name: "Mock Task Manager",
+        app_type: "web",
+        version: "1.0.0",
+        created_at: new Date().toISOString(),
+      },
+      data_schema: {
+        schema_version: "1.0.0",
+        entities: [
+          {
+            name: "Task",
+            tableName: "tasks",
+            fields: [
+              { name: "id", type: "uuid", required: true },
+              { name: "tenantId", type: "uuid", required: true },
+              { name: "title", type: "string", required: true },
+            ],
+            relations: []
+          }
+        ]
+      },
+      pages: [
+        { name: "home", path: "/", title: "Home", requires_auth: false, components: ["task-list"] }
+      ],
+      api_endpoints: [
+        { path: "/api/tasks", method: "GET", entity: "Task", auth_required: false, response_type: "json" }
+      ],
+      auth_rules: [],
+      integration_hooks: [ { integration_id: "slack", trigger: "message", action: "send_message", entity_mapping: {} } ],
+      workflows: [],
+      assumptions: []
+    };
+
+    return {
+      content: JSON.stringify(spec),
+      model: "mock-model",
+      provider: "gemini",
+      usage: { input_tokens: 5, output_tokens: 200, total_tokens: 205 },
+      latency_ms: Date.now() - now,
+    };
+  }
+}
+
+export { MockGateway };
+
+// ============================================================================
 // Graceful Fallback Handler
 // ============================================================================
 
@@ -410,22 +521,51 @@ export class AIGatewayWithFallback implements AIGateway {
   constructor(private gateway: MultiProviderGateway) {}
 
   async send(request: AIRequest): Promise<AIResponse> {
-    const primaryModel = MODEL_ROUTING[request.provider as keyof typeof MODEL_ROUTING];
-
-    if (!primaryModel) {
-      throw new Error(`No routing configured for provider: ${request.provider}`);
+    // If the requested provider is available, try it first
+    if (this.gateway.validateProvider(request.provider)) {
+      try {
+        return await this.gateway.send(request);
+      } catch (err) {
+        console.warn(`Provider ${request.provider} failed, will attempt fallback`, err);
+        // fallthrough to fallback selection
+      }
+    } else {
+      console.warn(`Provider ${request.provider} not configured, selecting fallback`);
     }
 
-    try {
-      return await this.gateway.send(request);
-    } catch (error) {
-      console.warn(
-        `Primary model ${request.model} failed, attempting fallback`,
-        error
-      );
-      // Fallback logic would be implemented here
-      throw error;
+    // Fallback selection order: prefer groq, then gemini, then openai
+    const fallbackOrder: AIProvider[] = ["groq", "gemini", "openai"];
+
+    // Default model mapping per provider (safe fallbacks)
+    const DEFAULT_MODEL: Record<AIProvider, string> = {
+      openai: "gpt-4o-mini",
+      groq: "llama-3.1-70b-versatile",
+      gemini: "gemini-2.0-flash",
+      anthropic: "",
+      mistral: "",
+      deepseek: "",
+      openrouter: "",
+    };
+
+    let lastError: Error | null = null;
+    for (const candidate of fallbackOrder) {
+      if (!this.gateway.validateProvider(candidate)) continue;
+      const chosenModel = DEFAULT_MODEL[candidate] || request.model;
+      try {
+        const fallbackRequest: AIRequest = {
+          ...request,
+          provider: candidate,
+          model: chosenModel,
+        };
+        console.info(`Routing request to fallback provider ${candidate}/${chosenModel}`);
+        return await this.gateway.send(fallbackRequest);
+      } catch (err) {
+        lastError = err as Error;
+        console.warn(`Fallback provider ${candidate} failed, trying next`, err);
+      }
     }
+
+    throw lastError ?? new Error("No available providers could fulfill the request");
   }
 
   validateProvider(provider: AIProvider): boolean {

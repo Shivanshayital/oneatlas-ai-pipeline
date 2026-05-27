@@ -1,5 +1,6 @@
-import { z, ZodError } from "zod";
+import { ZodError } from "zod";
 import { ValidationResult, ValidationError } from "../types";
+import { validateIntegrationReference } from "../integrations/registry";
 import {
   AppIntentSchema,
   DataSchemaSchema,
@@ -148,7 +149,6 @@ export class ValidationEngine {
 
     // Validate integrations exist
     if (appSpec.integration_hooks) {
-      const { validateIntegrationReference } = require("./registry");
       for (const hook of appSpec.integration_hooks) {
         if (hook.integration_id && !validateIntegrationReference(hook.integration_id)) {
           errors.push({
