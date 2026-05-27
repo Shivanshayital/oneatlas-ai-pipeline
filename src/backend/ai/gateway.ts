@@ -366,7 +366,7 @@ interface GeminiResponse {
       parts: Array<{ text: string }>;
     };
   }>;
-  usageMetadata: {
+  usageMetadata?: {
     promptTokenCount: number;
     candidatesTokenCount: number;
     totalTokenCount: number;
@@ -389,8 +389,6 @@ class GeminiProvider {
     max_tokens?: number,
     timeout: number = 30000
   ): Promise<AIResponse> {
-    const startTime = Date.now();
-
     const contents: GeminiContent[] = messages.map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
       parts: [{ text: m.content }],
@@ -404,44 +402,65 @@ class GeminiProvider {
       },
     };
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const inputText = messages.map((message) => message.content).join("\n");
+    const candidateModels = uniqueModels([
+      model,
+      "gemini-1.5-flash",
+      "gemini-2.0-flash",
+      "gemini-2.5-flash",
+    ]);
 
-    try {
-      const response = await fetch(
-        `${this.baseUrl}/${model}:generateContent?key=${this.apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-          signal: controller.signal,
+    let lastError: Error | null = null;
+    for (const candidateModel of candidateModels) {
+      const startTime = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+      try {
+        const response = await fetch(
+          `${this.baseUrl}/${candidateModel}:generateContent?key=${this.apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          }
+        );
+
+        if (!response.ok) {
+          const providerError = await readProviderError(response);
+          lastError = new Error(`Gemini API error: ${providerError}`);
+          if (response.status === 404 && providerError.toLowerCase().includes("not found")) {
+            continue;
+          }
+          throw lastError;
         }
-      );
 
-      if (!response.ok) {
-        throw new Error(`Gemini API error: ${await readProviderError(response)}`);
+        const data = (await response.json()) as GeminiResponse;
+        const content = requireContent(
+          data.candidates?.[0]?.content?.parts?.map((part) => part.text).join(""),
+          "gemini"
+        );
+        const inputTokens = data.usageMetadata?.promptTokenCount ?? estimateTokens(inputText);
+        const outputTokens = data.usageMetadata?.candidatesTokenCount ?? estimateTokens(content);
+
+        return {
+          content,
+          model: candidateModel,
+          provider: "gemini",
+          usage: {
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+            total_tokens: data.usageMetadata?.totalTokenCount ?? inputTokens + outputTokens,
+          },
+          latency_ms: Date.now() - startTime,
+        };
+      } finally {
+        clearTimeout(timeoutId);
       }
-
-      const data = (await response.json()) as GeminiResponse;
-      const content = requireContent(
-        data.candidates?.[0]?.content?.parts?.map((part) => part.text).join(""),
-        "gemini"
-      );
-
-      return {
-        content,
-        model,
-        provider: "gemini",
-        usage: {
-          input_tokens: data.usageMetadata.promptTokenCount,
-          output_tokens: data.usageMetadata.candidatesTokenCount,
-          total_tokens: data.usageMetadata.totalTokenCount,
-        },
-        latency_ms: Date.now() - startTime,
-      };
-    } finally {
-      clearTimeout(timeoutId);
     }
+
+    throw lastError ?? new Error("Gemini API error: no compatible model available");
   }
 }
 
@@ -604,7 +623,7 @@ export class MultiProviderGateway implements AIGateway {
   }
 
   validateProvider(provider: AIProvider): boolean {
-    if (provider === "anthropic" || provider === "mistral" || provider === "deepseek" || provider === "openrouter") {
+    if (provider === "anthropic" || provider === "mistral" || provider === "openrouter") {
       // Stub providers - return false until implemented
       return false; // These are stubs, so they are not validated as available
     }
@@ -626,6 +645,14 @@ export class MultiProviderGateway implements AIGateway {
     }
     return [];
   }
+}
+
+function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function uniqueModels(models: string[]): string[] {
+  return Array.from(new Set(models.filter(Boolean)));
 }
 
 // ============================================================================
@@ -755,6 +782,7 @@ export class AIGatewayWithFallback implements AIGateway {
 
   async send(request: AIRequest): Promise<AIResponse> {
     const attemptedProviders = new Set<AIProvider>();
+    const unavailableReasons: string[] = [];
 
     // If the requested provider is available, try it first
     if (
@@ -780,8 +808,12 @@ export class AIGatewayWithFallback implements AIGateway {
         // fallthrough to fallback selection
       }
     } else if (!this.gateway.validateProvider(request.provider)) {
+      unavailableReasons.push(`${request.provider}: not configured`);
       console.warn(`Provider ${request.provider} not configured, selecting fallback`);
     } else {
+      unavailableReasons.push(
+        `${request.provider}: ${providerHealth.getReason(request.provider) ?? "health cooldown"}`
+      );
       this._logProviderSkipOnce(request.provider);
     }
 
@@ -802,8 +834,14 @@ export class AIGatewayWithFallback implements AIGateway {
     let lastError: Error | null = null;
     for (const candidate of fallbackOrder) {
       if (attemptedProviders.has(candidate)) continue;
-      if (!this.gateway.validateProvider(candidate)) continue;
+      if (!this.gateway.validateProvider(candidate)) {
+        unavailableReasons.push(`${candidate}: not configured`);
+        continue;
+      }
       if (!providerHealth.isHealthy(candidate)) {
+        unavailableReasons.push(
+          `${candidate}: ${providerHealth.getReason(candidate) ?? "health cooldown"}`
+        );
         this._logProviderSkipOnce(candidate);
         continue;
       }
@@ -833,7 +871,7 @@ export class AIGatewayWithFallback implements AIGateway {
       }
     }
 
-    throw lastError ?? new Error("No available providers could fulfill the request");
+    throw lastError ?? new Error(`No available providers could fulfill the request (${unavailableReasons.join("; ")})`);
   }
 
   validateProvider(provider: AIProvider): boolean {

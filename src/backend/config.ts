@@ -5,6 +5,7 @@
 import fs from "fs";
 import path from "path";
 import { MultiProviderGateway, AIGatewayWithFallback, MockGateway } from "./ai/gateway";
+import type { AIProvider } from "./types";
 
 export interface Config {
   openai: {
@@ -14,6 +15,9 @@ export interface Config {
     apiKey: string;
   };
   gemini: {
+    apiKey: string;
+  };
+  deepseek: {
     apiKey: string;
   };
   enable_mock_mode?: boolean;
@@ -26,13 +30,16 @@ export function loadConfig(): Config {
 
   return {
     openai: {
-      apiKey: process.env.OPENAI_API_KEY || "",
+      apiKey: readEnv("OPENAI_API_KEY"),
     },
     groq: {
-      apiKey: process.env.GROQ_API_KEY || "",
+      apiKey: readEnv("GROQ_API_KEY"),
     },
     gemini: {
-      apiKey: process.env.GEMINI_API_KEY || "",
+      apiKey: readEnv("GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY"),
+    },
+    deepseek: {
+      apiKey: readEnv("DEEPSEEK_API_KEY"),
     },
     enable_mock_mode: typeof process.env.ENABLE_MOCK_MODE !== "undefined"
       ? process.env.ENABLE_MOCK_MODE === "true"
@@ -46,26 +53,31 @@ export function validateConfig(config: Config): string[] {
   // Backwards-compatible: return configuration warnings instead of hard errors.
   const warnings: string[] = [];
 
-  if (!config.openai.apiKey) {
-    warnings.push("OPENAI_API_KEY is not set");
+  if (!config.gemini.apiKey) {
+    warnings.push("GEMINI_API_KEY is not set");
+  }
+
+  if (!config.deepseek.apiKey) {
+    warnings.push("DEEPSEEK_API_KEY is not set");
   }
 
   if (!config.groq.apiKey) {
     warnings.push("GROQ_API_KEY is not set");
   }
 
-  if (!config.gemini.apiKey) {
-    warnings.push("GEMINI_API_KEY is not set");
+  if (!config.openai.apiKey) {
+    warnings.push("OPENAI_API_KEY is not set");
   }
 
   return warnings;
 }
 
-export function availableProviders(config: Config): string[] {
-  const providers: string[] = [];
+export function availableProviders(config: Config): AIProvider[] {
+  const providers: AIProvider[] = [];
   if (config.openai.apiKey) providers.push("openai");
   if (config.groq.apiKey) providers.push("groq");
   if (config.gemini.apiKey) providers.push("gemini");
+  if (config.deepseek.apiKey) providers.push("deepseek");
   return providers;
 }
 
@@ -86,6 +98,7 @@ export function initializePipeline(config: Config): AIGatewayWithFallback {
   if (config.openai.apiKey) registry.openai = { apiKey: config.openai.apiKey };
   if (config.groq.apiKey) registry.groq = { apiKey: config.groq.apiKey };
   if (config.gemini.apiKey) registry.gemini = { apiKey: config.gemini.apiKey };
+  if (config.deepseek.apiKey) registry.deepseek = { apiKey: config.deepseek.apiKey };
 
   const providers = availableProviders(config);
 
@@ -96,6 +109,14 @@ export function initializePipeline(config: Config): AIGatewayWithFallback {
 
   const gateway = new MultiProviderGateway(registry);
   return new AIGatewayWithFallback(gateway);
+}
+
+function readEnv(...keys: string[]): string {
+  for (const key of keys) {
+    const value = process.env[key]?.trim();
+    if (value) return value;
+  }
+  return "";
 }
 
 let envFilesLoaded = false;

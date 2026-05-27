@@ -302,7 +302,7 @@ export interface ProviderUsageSummaryItem {
   totalTokens: number;
   estimatedCost: number;
   latencyMs: number; // Average latency
-  status: "active" | "healthy" | "unhealthy" | "cooldown";
+  status: "active" | "inactive" | "healthy" | "unhealthy" | "cooldown";
   estimatedRemainingQuota: number;
   quotaStatus: 'low' | 'medium' | 'high' | 'near_limit' | 'unknown';
   failures: number;

@@ -180,7 +180,7 @@ export class PipelineExecutor {
     attempt: number
   ): void {
     const cost = this.costTracker.recordCost(
-      model,
+      `${provider}/${model}`,
       response.usage.input_tokens,
       response.usage.output_tokens
     );
@@ -251,24 +251,29 @@ export class PipelineExecutor {
           stage, // Pass stage to gateway for more granular fallback logic
         });
 
+        const effectiveAttempt = response.provider === provider ? attempt + 1 : attempt + 2;
+
         this._recordProviderUsage(
           jobId,
           stage,
           response.provider,
           response.model,
           response,
-          attempt + 1
+          effectiveAttempt
         );
 
-        if (attempt > 0) {
+        if (attempt > 0 || response.provider !== provider) {
           jobStore.addEvent(jobId, {
             type: "stage_retry",
             stage,
             timestamp: new Date().toISOString(),
             data: {
-              provider,
-              model,
-              attempt: attempt + 1,
+              provider: response.provider,
+              model: response.model,
+              requested_provider: provider,
+              requested_model: model,
+              attempt: effectiveAttempt,
+              fallback_used: response.provider !== provider,
             },
           });
         }
@@ -350,6 +355,8 @@ export class PipelineExecutor {
           },
         },
       });
+
+      this._updateMetrics(jobId);
 
       logger.info("Pipeline execution completed", {
         jobId,

@@ -2,6 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { jobStore } from "@/backend/store/job-store";
 import { StageEvent } from "@/backend/types";
 import { logger } from "@/backend/logging/logger";
+import { initializePipeline, loadConfig } from "@/backend/config";
+import { PipelineExecutor } from "@/backend/pipeline/executor";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 interface Params {
   jobId: string;
@@ -121,6 +127,16 @@ export async function GET(
         heartbeatInterval = setInterval(() => {
           safeEnqueue(": heartbeat\n\n");
         }, 30000);
+
+        if (jobStore.startProcessing(jobId)) {
+          const config = loadConfig();
+          const gateway = initializePipeline(config);
+          const executor = new PipelineExecutor(gateway);
+
+          executor.executePipeline(jobId, jobState.job.prompt).catch((error) => {
+            logger.error("Pipeline execution error", error as Error, { jobId });
+          });
+        }
       },
       cancel(): void {
         cleanup?.(); // Call cleanup if it exists

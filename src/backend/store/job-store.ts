@@ -5,8 +5,11 @@ import {
   RepairLog,
   PipelineMetrics,
   ProviderUsage,
+  ProviderUsageSummary,
+  ProviderUsageSummaryItem,
   RetryEntry,
   ValidationSnapshot,
+  AIProvider,
 } from "../types";
 
 // ============================================================================
@@ -81,6 +84,17 @@ export class JobStore {
       state.job.status = status;
       state.job.updated_at = new Date().toISOString();
     }
+  }
+
+  startProcessing(id: string): boolean {
+    const state = this.jobs.get(id);
+    if (!state || state.job.status !== "pending") {
+      return false;
+    }
+
+    state.job.status = "processing";
+    state.job.updated_at = new Date().toISOString();
+    return true;
   }
 
   setJobResult(id: string, result: JobResult): void {
@@ -167,6 +181,77 @@ export class JobStore {
     return this.jobs.get(id)?.provider_history ?? [];
   }
 
+  getProviderUsageSummary(
+    id: string,
+    configuredProviders: AIProvider[] = []
+  ): ProviderUsageSummary {
+    const history = this.getProviderHistory(id);
+    const retries = this.getRetryHistory(id);
+    const allProviders: AIProvider[] = [
+      "gemini",
+      "deepseek",
+      "groq",
+      "openai",
+      "anthropic",
+      "mistral",
+      "openrouter",
+    ];
+
+    return allProviders.reduce((summary, provider) => {
+      const providerHistory = history.filter((usage) => usage.provider === provider);
+      const failures = retries.filter((retry) => retry.provider === provider).length;
+      const requests = providerHistory.length;
+      const inputTokens = providerHistory.reduce(
+        (total, usage) => total + usage.tokens.input_tokens,
+        0
+      );
+      const outputTokens = providerHistory.reduce(
+        (total, usage) => total + usage.tokens.output_tokens,
+        0
+      );
+      const totalTokens = providerHistory.reduce(
+        (total, usage) => total + usage.tokens.total_tokens,
+        0
+      );
+      const estimatedCost = providerHistory.reduce(
+        (total, usage) => total + usage.tokens.estimated_cost,
+        0
+      );
+      const latencyTotal = providerHistory.reduce(
+        (total, usage) => total + usage.latency_ms,
+        0
+      );
+      const quota = quotaForProvider(provider);
+      const estimatedRemainingQuota = quota
+        ? Math.max(0, quota - totalTokens)
+        : 0;
+
+      summary[provider] = {
+        provider,
+        model: providerHistory.at(-1)?.model,
+        requests,
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        totalTokens,
+        estimatedCost,
+        latencyMs: requests > 0 ? latencyTotal / requests : 0,
+        status:
+          requests > 0
+            ? "active"
+            : failures > 0
+              ? "unhealthy"
+              : configuredProviders.includes(provider)
+                ? "healthy"
+                : "inactive",
+        estimatedRemainingQuota,
+        quotaStatus: quota ? quotaStatus(totalTokens, quota) : "unknown",
+        failures,
+      };
+
+      return summary;
+    }, {} as ProviderUsageSummary);
+  }
+
   getRetryHistory(id: string): RetryEntry[] {
     return this.jobs.get(id)?.retry_history ?? [];
   }
@@ -234,3 +319,24 @@ if (!globalRef.__ONEATLAS_JOB_STORE) {
 }
 
 export const jobStore: JobStore = globalRef.__ONEATLAS_JOB_STORE;
+
+function quotaForProvider(provider: AIProvider): number | undefined {
+  const quotas: Partial<Record<AIProvider, number>> = {
+    gemini: 1_000_000,
+    deepseek: 1_000_000,
+    groq: 5_000_000,
+    openai: 1_000_000,
+  };
+  return quotas[provider];
+}
+
+function quotaStatus(
+  usedTokens: number,
+  quota: number
+): ProviderUsageSummaryItem["quotaStatus"] {
+  const percentage = quota > 0 ? (usedTokens / quota) * 100 : 0;
+  if (percentage >= 95) return "near_limit";
+  if (percentage >= 80) return "high";
+  if (percentage >= 50) return "medium";
+  return "low";
+}

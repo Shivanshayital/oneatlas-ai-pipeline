@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { jobStore } from "@/backend/store/job-store";
 import { logger } from "@/backend/logging/logger";
+import { availableProviders, loadConfig } from "@/backend/config";
+import type { AIProvider } from "@/backend/types";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 interface Params {
   jobId: string;
@@ -33,6 +38,7 @@ export async function GET(
     const retryHistory = jobStore.getRetryHistory(jobId);
     const validationSnapshots = jobStore.getValidationSnapshots(jobId);
     const metrics = jobStore.getMetrics(jobId);
+    const configuredProviders = availableProviders(loadConfig()) as AIProvider[];
 
     const response: Record<string, unknown> = {
       job_id: job.id,
@@ -46,6 +52,7 @@ export async function GET(
       retry_history: retryHistory,
       validation_snapshots: validationSnapshots,
       metrics,
+      provider_usage_summary: jobStore.getProviderUsageSummary(jobId, configuredProviders),
     };
 
     if (job.result) {

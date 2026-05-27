@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "src/app/api/generate/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/generate/[jobId]/stream/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/generate/[jobId]/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/generate/[jobId]/repair/route.ts": {
+      "maxDuration": 30
+    }
+  }
+}

@@ -5,6 +5,7 @@ import type { ReactElement } from "react";
 import PromptInput from "@/components/PromptInput";
 import StageProgressPanel from "@/components/StageProgressPanel";
 import AppSpecViewer from "@/components/AppSpecViewer";
+import RepairLogPanel from "@/components/RepairLogPanel";
 import ProviderUsageDashboard from "@/components/ProviderUsageDashboard";
 import IntegrationRegistryPanel from "@/components/IntegrationRegistryPanel";
 import type {
@@ -15,6 +16,7 @@ import type {
   PipelineMetrics,
   ProviderUsageSummary,
   ProviderUsage,
+  AIProvider,
 } from "@/backend/types";
 
 export default function HomePage(): ReactElement {
@@ -83,6 +85,17 @@ export default function HomePage(): ReactElement {
       const payload = JSON.parse((event as MessageEvent).data) as StageEvent;
       setEvents((prev) => [...prev, payload]);
       setStatus("running");
+      if (payload.latency_ms) {
+        setMetrics((prev) => {
+          const next = prev ?? emptyMetrics();
+          const latency = { ...next.latency };
+          if (payload.stage === "intent") latency.intent_stage_ms = payload.latency_ms ?? 0;
+          if (payload.stage === "schema") latency.schema_stage_ms = payload.latency_ms ?? 0;
+          if (payload.stage === "spec") latency.spec_stage_ms = payload.latency_ms ?? 0;
+          latency.total_ms = latency.intent_stage_ms + latency.schema_stage_ms + latency.spec_stage_ms;
+          return { ...next, latency };
+        });
+      }
     });
 
     source.addEventListener("stage_retry", (event) => {
@@ -97,7 +110,7 @@ export default function HomePage(): ReactElement {
       const providerUsage = payload.data?.provider_usage as ProviderUsage | undefined;
       if (providerUsage) {
         setProviderHistory((prev) => [...prev, providerUsage]);
-        // Optionally, update a live summary here if needed, or rely on fetchJobDetails at completion
+        setMetrics((prev) => addUsageToMetrics(prev, providerUsage));
       }
     });
 
@@ -155,6 +168,7 @@ export default function HomePage(): ReactElement {
       }
 
       setJobId(data.job_id);
+      setProviderUsageSummary(createProviderSummary(data.available_providers));
       subscribeToSse(data.job_id);
     } catch (error) {
       setErrorMessage(String(error));
@@ -183,6 +197,7 @@ export default function HomePage(): ReactElement {
             <PromptInput onSubmit={handleSubmit} disabled={isExecuting} />
             <StageProgressPanel events={events} status={status} providerHistory={providerHistory} />
             <AppSpecViewer spec={spec ?? undefined} />
+            <RepairLogPanel repairs={repairs} />
           </div>
 
           <div className="space-y-6">
@@ -198,6 +213,8 @@ export default function HomePage(): ReactElement {
                 <SummaryItem label="Tokens" value={metrics ? metrics.tokens.total_tokens.toLocaleString() : "--"} />
                 <SummaryItem label="Prompt" value={metrics ? String(metrics.tokens.input_tokens) : "--"} mono />
                 <SummaryItem label="Completion" value={metrics ? String(metrics.tokens.output_tokens) : "--"} mono />
+                <SummaryItem label="Fallback used" value={providerHistory.some((usage) => usage.attempt > 1) ? "yes" : "no"} />
+                <SummaryItem label="Latency" value={providerHistory.at(-1) ? `${providerHistory.at(-1)?.latency_ms.toFixed(0)}ms` : "--"} />
                 <SummaryItem
                   label="Provider"
                   value={providerHistory.at(-1)?.provider ?? "--"}
@@ -221,6 +238,73 @@ export default function HomePage(): ReactElement {
       </div>
     </main>
   );
+}
+
+function emptyMetrics(): PipelineMetrics {
+  return {
+    tokens: {
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      estimated_cost: 0,
+    },
+    latency: {
+      intent_stage_ms: 0,
+      schema_stage_ms: 0,
+      spec_stage_ms: 0,
+      total_ms: 0,
+    },
+    repair_attempts: 0,
+    successful_repairs: 0,
+  };
+}
+
+function addUsageToMetrics(
+  metrics: PipelineMetrics | null,
+  usage: ProviderUsage
+): PipelineMetrics {
+  const next = metrics ?? emptyMetrics();
+  return {
+    ...next,
+    tokens: {
+      input_tokens: next.tokens.input_tokens + usage.tokens.input_tokens,
+      output_tokens: next.tokens.output_tokens + usage.tokens.output_tokens,
+      total_tokens: next.tokens.total_tokens + usage.tokens.total_tokens,
+      estimated_cost: next.tokens.estimated_cost + usage.tokens.estimated_cost,
+    },
+  };
+}
+
+function createProviderSummary(providers: unknown): ProviderUsageSummary {
+  const configured = new Set(
+    Array.isArray(providers) ? providers.map((provider) => String(provider)) : []
+  );
+  const allProviders: AIProvider[] = [
+    "gemini",
+    "deepseek",
+    "groq",
+    "openai",
+    "anthropic",
+    "mistral",
+    "openrouter",
+  ];
+
+  return allProviders.reduce((summary, provider) => {
+    summary[provider] = {
+      provider,
+      requests: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      estimatedCost: 0,
+      latencyMs: 0,
+      status: configured.has(provider) ? "healthy" : "inactive",
+      estimatedRemainingQuota: 0,
+      quotaStatus: "unknown",
+      failures: 0,
+    };
+    return summary;
+  }, {} as ProviderUsageSummary);
 }
 
 function SummaryItem({

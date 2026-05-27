@@ -47,7 +47,7 @@ const ProviderUsageDashboard: React.FC<ProviderUsageDashboardProps> = ({
           const displayTotalTokens = sessionUsage?.totalTokens ?? summary?.totalTokens ?? 0;
           const displayEstimatedCost = sessionUsage?.estimatedCost ?? summary?.estimatedCost ?? 0;
           const displayLatency = sessionUsage?.latencyMs ?? summary?.latencyMs ?? 0;
-          const displayStatus = summary?.status ?? (displayRequests > 0 ? "active" : "inactive");
+          const displayStatus = displayRequests > 0 ? "active" : summary?.status ?? "inactive";
           const displayModel = summary?.model ?? ([...providerHistory].reverse().find((p) => p.provider === providerId)?.model) ?? "N/A";
           const displayQuotaStatus = summary?.quotaStatus ?? "unknown";
           const getQuotaBadgeColor = (status: string): string => {

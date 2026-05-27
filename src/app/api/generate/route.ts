@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuidv4 } from "uuid";
-import { loadConfig, initializePipeline, availableProviders, configurationWarnings, validateEnvironment } from "@/backend/config";
+import { loadConfig, availableProviders, configurationWarnings, validateEnvironment } from "@/backend/config";
 import { jobStore } from "@/backend/store/job-store";
-import { PipelineExecutor } from "@/backend/pipeline/executor";
 import { logger } from "@/backend/logging/logger";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 interface GenerateRequest {
   prompt: string;
@@ -84,16 +87,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     logger.info("Generation job created", { jobId, promptLength: trimmedPrompt.length });
 
-    // Start pipeline asynchronously (don't wait)
-    const gateway = initializePipeline(config);
-    const executor = new PipelineExecutor(gateway);
-
-    // Fire and forget
-    executor.executePipeline(jobId, trimmedPrompt).catch((error) => {
-      logger.error("Pipeline execution error", error as Error, { jobId });
-    });
-
-    // Return immediately with provider info and configuration warnings
+    // The SSE route starts execution so Vercel keeps the function alive while streaming.
     return NextResponse.json(
       {
         job_id: jobId,

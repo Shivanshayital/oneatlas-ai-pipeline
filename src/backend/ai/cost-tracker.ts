@@ -11,6 +11,7 @@ const TOKEN_PRICING_PER_MILLION_INPUT_USD: Record<string, number> = {
   "groq/llama-3.3-70b-versatile": 0.50, // Estimate, Groq pricing is per 1M tokens
   "groq/llama-3.1-8b-instant": 0.10, // Estimate
   "gemini/gemini-2.0-flash": 0.35, // Estimate, Gemini pricing is per 1k characters
+  "gemini/gemini-2.5-flash": 0.35, // Estimate
   "gemini/gemini-1.5-pro": 3.50, // Estimate
   "gemini/gemini-1.5-flash": 0.35, // Estimate
   "gemini/gemini-2.0-flash-exp": 0.35, // Estimate
@@ -25,6 +26,7 @@ const TOKEN_PRICING_PER_MILLION_OUTPUT_USD: Record<string, number> = {
   "groq/llama-3.3-70b-versatile": 0.50, // Estimate
   "groq/llama-3.1-8b-instant": 0.10, // Estimate
   "gemini/gemini-2.0-flash": 0.70, // Estimate
+  "gemini/gemini-2.5-flash": 0.70, // Estimate
   "gemini/gemini-1.5-pro": 10.50, // Estimate
   "gemini/gemini-1.5-flash": 0.70, // Estimate
   "gemini/gemini-2.0-flash-exp": 0.70, // Estimate
