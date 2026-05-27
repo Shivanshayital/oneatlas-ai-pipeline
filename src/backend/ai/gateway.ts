@@ -52,23 +52,37 @@ interface ProviderRegistry {
   openrouter?: ProviderConfig;
 }
 
-async function readProviderError(response: Response): Promise<string> {
-  const text = await response.text().catch(() => "");
-  if (!text) return `${response.status} ${response.statusText}`;
+export interface DetailedProviderError {
+  message: string;
+  type: 'rate_limit' | 'quota' | 'timeout' | 'context_length' | 'auth' | 'unknown';
+  status: number;
+}
 
-  try { // Explicitly type parsed
+async function readProviderError(response: Response): Promise<DetailedProviderError> {
+  const text = await response.text().catch(() => "");
+  let message = text || `${response.status} ${response.statusText}`;
+  let type: DetailedProviderError['type'] = 'unknown';
+
+  try {
     const parsed = JSON.parse(text) as {
-      error?: { message?: string } | string;
+      error?: { message?: string; code?: string } | string;
       message?: string;
     };
-    if (typeof parsed.error === "string") return parsed.error;
-    if (parsed.error?.message) return parsed.error.message;
-    if (parsed.message) return parsed.message;
-  } catch {
-    // Keep the raw body below.
-  }
+    message = (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) || parsed.message || message;
+  } catch {}
 
-  return text.slice(0, 500);
+  const normalized = message.toLowerCase();
+  if (response.status === 429) type = 'rate_limit';
+  else if (normalized.includes("quota") || normalized.includes("billing") || response.status === 402) type = 'quota';
+  else if (response.status === 401 || response.status === 403) type = 'auth';
+  else if (normalized.includes("context_length") || normalized.includes("too many tokens") || response.status === 413) type = 'context_length';
+  else if (normalized.includes("timeout") || normalized.includes("abort")) type = 'timeout';
+
+  return {
+    message: message.slice(0, 500),
+    type,
+    status: response.status
+  };
 }
 
 function requireContent(content: string | undefined, provider: AIProvider): string {
@@ -243,7 +257,8 @@ class OpenAIProvider {
       });
 
       if (!response.ok) {
-        throw new Error(`OpenAI API error: ${await readProviderError(response)}`);
+        const err = await readProviderError(response);
+        throw new Error(`OpenAI [${err.type}]: ${err.message}`);
       }
 
       const data = (await response.json()) as OpenAIResponse;
@@ -328,7 +343,8 @@ class GroqProvider {
       });
 
       if (!response.ok) {
-        throw new Error(`Groq API error: ${await readProviderError(response)}`);
+        const err = await readProviderError(response);
+        throw new Error(`Groq [${err.type}]: ${err.message}`);
       }
 
       const data = (await response.json()) as GroqResponse;
@@ -429,9 +445,9 @@ class GeminiProvider {
 
         if (!response.ok) {
           const providerError = await readProviderError(response);
-          lastError = new Error(`Gemini API error: ${providerError}`);
-          if (response.status === 404 && providerError.toLowerCase().includes("not found")) {
-            continue;
+          lastError = new Error(`Gemini [${providerError.type}]: ${providerError.message}`);
+          if (response.status === 404 && providerError.message.toLowerCase().includes("not found")) {
+            continue; // Try next candidate model
           }
           throw lastError;
         }
@@ -526,7 +542,8 @@ class DeepSeekProvider {
       });
 
       if (!response.ok) {
-        throw new Error(`DeepSeek API error: ${await readProviderError(response)}`);
+        const err = await readProviderError(response);
+        throw new Error(`DeepSeek [${err.type}]: ${err.message}`);
       }
 
       const data = (await response.json()) as DeepSeekResponse;
@@ -818,7 +835,7 @@ export class AIGatewayWithFallback implements AIGateway {
     }
 
     // Fallback selection order: prefer Gemini, then DeepSeek, then Groq, then OpenAI
-    const fallbackOrder: AIProvider[] = ["gemini", "deepseek", "groq", "openai"];
+    const fallbackOrder: AIProvider[] = ["gemini", "deepseek", "groq", "openai"]; // Required Priority
 
     // Default model mapping per provider (safe fallbacks)
     const DEFAULT_MODEL: Record<AIProvider, string> = {

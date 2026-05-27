@@ -138,6 +138,10 @@ export interface StageEvent {
   tokens?: TokenMetrics;
   cost_usd?: number;
   error?: string;
+  is_fallback?: boolean;
+  previous_provider?: AIProvider;
+  failure_reason?: string;
+  is_degraded?: boolean;
 }
 
 export interface ProviderUsage {
@@ -157,6 +161,7 @@ export interface RetryEntry {
   provider: AIProvider;
   model: string;
   error: string;
+  failure_type?: 'rate_limit' | 'quota' | 'timeout' | 'context_length' | 'unknown';
   timestamp: string;
 }
 
