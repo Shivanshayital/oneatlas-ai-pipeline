@@ -4,7 +4,14 @@
 
 export interface AppIntent {
   appName: string;
-  appType: "web" | "mobile" | "desktop" | "api" | "hybrid";
+  appType:
+    | "crm"
+    | "project_management"
+    | "ecommerce"
+    | "hr_tool"
+    | "inventory"
+    | "analytics"
+    | "custom";
   features: string[];
   entities: string[];
   integrations_requested: string[];

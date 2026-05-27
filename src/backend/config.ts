@@ -2,6 +2,8 @@
 // Configuration Module
 // ============================================================================
 
+import fs from "fs";
+import path from "path";
 import { MultiProviderGateway, AIGatewayWithFallback, MockGateway } from "./ai/gateway";
 
 export interface Config {
@@ -20,6 +22,8 @@ export interface Config {
 }
 
 export function loadConfig(): Config {
+  loadLocalEnvFiles();
+
   return {
     openai: {
       apiKey: process.env.OPENAI_API_KEY || "",
@@ -87,9 +91,43 @@ export function initializePipeline(config: Config): AIGatewayWithFallback {
 
   if (providers.length === 0 && config.enable_mock_mode) {
     // Development mock mode - return a simple mock gateway
-    return new AIGatewayWithFallback(new (MockGateway as any)() as any);
+    return new AIGatewayWithFallback(new MockGateway());
   }
 
-  const gateway = new MultiProviderGateway(registry as any);
+  const gateway = new MultiProviderGateway(registry);
   return new AIGatewayWithFallback(gateway);
+}
+
+let envFilesLoaded = false;
+
+function loadLocalEnvFiles(): void {
+  if (envFilesLoaded) return;
+  envFilesLoaded = true;
+
+  for (const envFile of [".env.local", path.join("src", ".env.local")]) {
+    const filePath = path.resolve(process.cwd(), envFile);
+    if (!fs.existsSync(filePath)) continue;
+
+    const contents = fs.readFileSync(filePath, "utf8");
+    for (const line of contents.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+
+      const separatorIndex = trimmed.indexOf("=");
+      if (separatorIndex <= 0) continue;
+
+      const key = trimmed.slice(0, separatorIndex).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || process.env[key]) continue;
+
+      let value = trimmed.slice(separatorIndex + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+
+      process.env[key] = value;
+    }
+  }
 }

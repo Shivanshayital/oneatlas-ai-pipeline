@@ -1,6 +1,10 @@
 import { ZodError } from "zod";
 import { ValidationResult, ValidationError } from "../types";
-import { validateIntegrationReference } from "../integrations/registry";
+import {
+  validateIntegrationAction,
+  validateIntegrationReference,
+  validateIntegrationTrigger,
+} from "../integrations/registry";
 import {
   AppIntentSchema,
   DataSchemaSchema,
@@ -110,10 +114,14 @@ export class ValidationEngine {
     const errors: ValidationError[] = [];
     const appSpec = spec as {
       data_schema?: { entities?: Array<{ name: string }> };
-      pages?: Array<{ name: string }>;
-      api_endpoints?: Array<{ entity?: string }>;
-      workflows?: Array<{ trigger_entity?: string }>;
-      integration_hooks?: Array<{ integration_id?: string }>;
+      pages?: Array<{ name: string; path?: string }>;
+      api_endpoints?: Array<{ entity?: string; path?: string; method?: string }>;
+      workflows?: Array<{
+        name?: string;
+        trigger_entity?: string;
+        steps?: Array<{ integration_id?: string; action?: string }>;
+      }>;
+      integration_hooks?: Array<{ integration_id?: string; trigger?: string; action?: string }>;
     };
 
     if (!appSpec || typeof appSpec !== "object") return errors;
@@ -144,6 +152,50 @@ export class ValidationEngine {
             code: "invalid_entity_reference",
           });
         }
+
+        const inferredEntity = this._inferEntityFromText(workflow.name ?? "", entityNames);
+        if (
+          inferredEntity &&
+          workflow.trigger_entity &&
+          workflow.trigger_entity !== inferredEntity
+        ) {
+          errors.push({
+            field: `workflows.${workflow.name}`,
+            message: `Workflow "${workflow.name}" appears to target "${inferredEntity}" but is mapped to "${workflow.trigger_entity}"`,
+            code: "workflow_entity_mismatch",
+          });
+        }
+
+        for (const step of workflow.steps ?? []) {
+          if (!step.integration_id) continue;
+          if (!validateIntegrationReference(step.integration_id)) {
+            errors.push({
+              field: `workflows.${workflow.name}.steps`,
+              message: `Integration "${step.integration_id}" not found in registry`,
+              code: "invalid_integration_reference",
+            });
+            continue;
+          }
+
+          if (step.action && !validateIntegrationAction(step.integration_id, step.action)) {
+            errors.push({
+              field: `workflows.${workflow.name}.steps`,
+              message: `Action "${step.action}" is not valid for integration "${step.integration_id}"`,
+              code: "invalid_integration_action",
+            });
+          }
+
+          const matchingHook = appSpec.integration_hooks?.some(
+            (hook) => hook.integration_id === step.integration_id
+          );
+          if (!matchingHook) {
+            errors.push({
+              field: `integration_hooks.${step.integration_id}`,
+              message: `Workflow uses "${step.integration_id}" but no matching integration hook exists`,
+              code: "missing_integration_hook",
+            });
+          }
+        }
       }
     }
 
@@ -157,10 +209,57 @@ export class ValidationEngine {
             code: "invalid_integration_reference",
           });
         }
+
+        if (
+          hook.integration_id &&
+          hook.trigger &&
+          !validateIntegrationTrigger(hook.integration_id, hook.trigger)
+        ) {
+          errors.push({
+            field: `integration_hooks.${hook.integration_id}.trigger`,
+            message: `Trigger "${hook.trigger}" is not valid for integration "${hook.integration_id}"`,
+            code: "invalid_integration_trigger",
+          });
+        }
+
+        if (
+          hook.integration_id &&
+          hook.action &&
+          !validateIntegrationAction(hook.integration_id, hook.action)
+        ) {
+          errors.push({
+            field: `integration_hooks.${hook.integration_id}.action`,
+            message: `Action "${hook.action}" is not valid for integration "${hook.integration_id}"`,
+            code: "invalid_integration_action",
+          });
+        }
+      }
+    }
+
+    if (appSpec.pages && appSpec.api_endpoints) {
+      for (const page of appSpec.pages) {
+        const pagePath = page.path ?? "";
+        const hasMappedEndpoint = appSpec.api_endpoints.some((endpoint) => {
+          const endpointPath = endpoint.path ?? "";
+          return endpointPath === pagePath || endpointPath.startsWith(`/api${pagePath}`);
+        });
+
+        if (pagePath && !hasMappedEndpoint) {
+          errors.push({
+            field: `pages.${page.name}`,
+            message: `Page "${page.name}" has no matching API endpoint`,
+            code: "missing_page_api_mapping",
+          });
+        }
       }
     }
 
     return errors;
+  }
+
+  private _inferEntityFromText(text: string, entities: Set<string>): string | undefined {
+    const normalized = text.toLowerCase();
+    return Array.from(entities).find((entity) => normalized.includes(entity.toLowerCase()));
   }
 
   validateDataEntity(data: unknown): ValidationResult {

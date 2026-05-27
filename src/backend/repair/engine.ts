@@ -162,10 +162,93 @@ export class RepairEngine {
             }
           }
         }
+
+        if (Array.isArray(entity.relations)) {
+          const relations = entity.relations as Array<Record<string, unknown>>;
+          for (let index = relations.length - 1; index >= 0; index -= 1) {
+            const relation = relations[index];
+            if (!relation || typeof relation !== "object") {
+              relations.splice(index, 1);
+              continue;
+            }
+
+            const fromEntity = String(relation.from_entity ?? entity.name ?? "");
+            const toEntity = String(relation.to_entity ?? "");
+            if (!fromEntity || !toEntity) {
+              relations.splice(index, 1);
+              this._logRepair(
+                stage,
+                strategy,
+                `Invalid relation on entity ${entity.name ?? "unknown"}`,
+                "Removed relation without from_entity/to_entity",
+                "partial"
+              );
+              continue;
+            }
+
+            relation.from_entity = fromEntity;
+            relation.to_entity = toEntity;
+
+            if (!relation.name) {
+              relation.name = `${fromEntity}_${toEntity}_relation`;
+              this._logRepair(
+                stage,
+                strategy,
+                `Missing relation name for ${fromEntity} -> ${toEntity}`,
+                `Injected relation name ${relation.name}`,
+                "success"
+              );
+            }
+
+            if (typeof relation.cardinality === "string") {
+              relation.cardinality = relation.cardinality.replace(/_/g, "-");
+            }
+
+            if (!["one-to-one", "one-to-many", "many-to-many"].includes(String(relation.cardinality))) {
+              relation.cardinality = "one-to-many";
+              this._logRepair(
+                stage,
+                strategy,
+                `Invalid relation cardinality for ${relation.name}`,
+                "Mapped cardinality to one-to-many",
+                "partial"
+              );
+            }
+
+            if (!relation.foreign_key_field) {
+              relation.foreign_key_field = `${String(toEntity).charAt(0).toLowerCase()}${String(toEntity).slice(1)}Id`;
+              this._logRepair(
+                stage,
+                strategy,
+                `Missing foreign_key_field for ${relation.name}`,
+                `Injected foreign key ${relation.foreign_key_field}`,
+                "success"
+              );
+            }
+          }
+        } else {
+          entity.relations = [];
+        }
       }
     }
 
     if (stage === "spec") {
+      for (const key of ["pages", "api_endpoints", "auth_rules", "integration_hooks", "workflows", "assumptions"]) {
+        if (key in repairedData && !Array.isArray(repairedData[key])) {
+          repairedData[key] = [];
+          this._logRepair(stage, strategy, `Wrong type: ${key}`, "Converted to empty array", "partial");
+        }
+      }
+
+      if (repairedData.metadata && typeof repairedData.metadata === "object") {
+        const metadata = repairedData.metadata as Record<string, unknown>;
+        if (!metadata.version) metadata.version = "1.0.0";
+        if (!metadata.created_at || typeof metadata.created_at !== "string") {
+          metadata.created_at = new Date().toISOString();
+          this._logRepair(stage, strategy, "Invalid metadata.created_at", "Injected current ISO timestamp", "success");
+        }
+      }
+
       if (Array.isArray(repairedData.pages)) {
         const pages = repairedData.pages as Array<Record<string, unknown>>;
         for (const page of pages) {
@@ -206,6 +289,10 @@ export class RepairEngine {
               "success"
             );
           }
+
+          if (typeof endpoint.method === "string") {
+            endpoint.method = endpoint.method.toUpperCase();
+          }
         }
       }
 
@@ -223,6 +310,92 @@ export class RepairEngine {
             );
           }
         }
+      }
+
+      if (Array.isArray(repairedData.auth_rules)) {
+        const authRules = repairedData.auth_rules as Array<Record<string, unknown>>;
+        for (let index = authRules.length - 1; index >= 0; index -= 1) {
+          const rule = authRules[index];
+          if (!rule || typeof rule !== "object") {
+            authRules.splice(index, 1);
+            continue;
+          }
+
+          if (!rule.resource) {
+            authRules.splice(index, 1);
+            this._logRepair(
+              stage,
+              strategy,
+              "Invalid auth rule",
+              "Removed auth rule without resource",
+              "partial"
+            );
+            continue;
+          }
+
+          if (!Array.isArray(rule.actions) || rule.actions.length === 0) {
+            rule.actions = ["read", "create", "update", "delete"];
+            this._logRepair(
+              stage,
+              strategy,
+              `Missing actions for auth rule ${rule.resource}`,
+              "Injected CRUD actions",
+              "partial"
+            );
+          }
+
+          if (!Array.isArray(rule.roles) || rule.roles.length === 0) {
+            rule.roles = ["admin", "member"];
+            this._logRepair(
+              stage,
+              strategy,
+              `Missing roles for auth rule ${rule.resource}`,
+              "Injected default roles",
+              "partial"
+            );
+          }
+        }
+      }
+
+      if (Array.isArray(repairedData.workflows)) {
+        const workflows = repairedData.workflows as Array<Record<string, unknown>>;
+        for (const workflow of workflows) {
+          if (!["event", "schedule", "manual"].includes(String(workflow.trigger_type))) {
+            workflow.trigger_type = "event";
+            this._logRepair(
+              stage,
+              strategy,
+              `Invalid trigger_type for workflow ${workflow.name ?? "unknown"}`,
+              "Mapped trigger_type to event",
+              "partial"
+            );
+          }
+
+          if (!Array.isArray(workflow.steps) || workflow.steps.length === 0) {
+            workflow.steps = [{ action: "notify" }];
+            this._logRepair(
+              stage,
+              strategy,
+              `Missing steps for workflow ${workflow.name ?? "unknown"}`,
+              "Injected placeholder workflow step",
+              "partial"
+            );
+          }
+        }
+      }
+
+      if (Array.isArray(repairedData.assumptions)) {
+        repairedData.assumptions = repairedData.assumptions.map((assumption) => {
+          if (typeof assumption === "string") return assumption;
+          if (assumption && typeof assumption === "object") {
+            const record = assumption as Record<string, unknown>;
+            const firstStringValue = Object.values(record).find(
+              (value): value is string => typeof value === "string"
+            );
+            return firstStringValue ?? JSON.stringify(record);
+          }
+          return String(assumption);
+        });
       }
     }
 
@@ -253,15 +426,16 @@ export class RepairEngine {
       for (let i = workflows.length - 1; i >= 0; i -= 1) {
         const workflow = workflows[i];
         const triggerEntity = String(workflow.trigger_entity ?? "");
+        const inferredEntity = this._inferEntityFromText(String(workflow.name ?? ""), entities);
 
         if (!entities.includes(triggerEntity)) {
-          if (entities.length > 0) {
-            workflow.trigger_entity = entities[0];
+          if (inferredEntity || entities.length > 0) {
+            workflow.trigger_entity = inferredEntity ?? entities[0];
             this._logRepair(
               stage,
               strategy,
               `Broken workflow entity mapping for workflow ${workflow.name ?? i}`,
-              `Mapped trigger_entity to ${entities[0]}`,
+              `Mapped trigger_entity to ${workflow.trigger_entity}`,
               "partial"
             );
           } else {
@@ -301,6 +475,20 @@ export class RepairEngine {
                   stage,
                   strategy,
                   `Invalid action ${actionId} for integration ${integrationId}`,
+                  `Mapped to first valid action ${fallback}`,
+                  "partial"
+                );
+              }
+            }
+
+            if (integration && !actionId) {
+              const fallback = integration.actions[0]?.id;
+              if (fallback) {
+                step.action = fallback;
+                this._logRepair(
+                  stage,
+                  strategy,
+                  `Missing action for integration ${integrationId}`,
                   `Mapped to first valid action ${fallback}`,
                   "partial"
                 );
@@ -453,10 +641,15 @@ export class RepairEngine {
     });
   }
 
+  private _inferEntityFromText(text: string, entities: string[]): string | undefined {
+    const normalized = text.toLowerCase();
+    return entities.find((entity) => normalized.includes(entity.toLowerCase()));
+  }
+
   private _getFieldDefault(field: string): unknown {
     const defaults: Record<string, unknown> = {
       appName: "Generated App",
-      appType: "web",
+      appType: "custom",
       features: [],
       entities: [],
       integrations_requested: [],

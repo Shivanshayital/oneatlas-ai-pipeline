@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
 }
 
 html {
@@ -15,6 +15,7 @@ html {
 body {
   min-height: 100vh;
   margin: 0;
+  background: #f1f5f9;
 }
 
 * {
@@ -23,4 +24,15 @@ body {
 
 button, input, textarea {
   font: inherit;
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    background-color: #020617;
+    color: #f8fafc;
+  }
+
+  body {
+    background: #020617;
+  }
 }

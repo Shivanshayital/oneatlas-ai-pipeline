@@ -6,16 +6,16 @@ import { AIProvider, AIRequest, AIResponse } from "../types";
 
 export const MODEL_ROUTING = {
   intent: {
-    primary: "groq/llama-3.1-70b-versatile",
-    fallback: "openai/gpt-4o-mini",
+    primary: "groq/llama-3.3-70b-versatile",
+    fallback: "gemini/gemini-2.0-flash",
   },
   schema: {
-    primary: "openai/gpt-4o",
+    primary: "groq/llama-3.3-70b-versatile",
     fallback: "gemini/gemini-2.0-flash",
   },
   spec: {
-    primary: "openai/gpt-4o",
-    fallback: "groq/llama-3.1-70b-versatile",
+    primary: "groq/llama-3.3-70b-versatile",
+    fallback: "gemini/gemini-2.0-flash",
   },
 } as const;
 
@@ -48,6 +48,128 @@ interface ProviderRegistry {
   deepseek?: ProviderConfig;
   openrouter?: ProviderConfig;
 }
+
+async function readProviderError(response: Response): Promise<string> {
+  const text = await response.text().catch(() => "");
+  if (!text) return `${response.status} ${response.statusText}`;
+
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: { message?: string } | string;
+      message?: string;
+    };
+    if (typeof parsed.error === "string") return parsed.error;
+    if (parsed.error?.message) return parsed.error.message;
+    if (parsed.message) return parsed.message;
+  } catch {
+    // Keep the raw body below.
+  }
+
+  return text.slice(0, 500);
+}
+
+function requireContent(content: string | undefined, provider: AIProvider): string {
+  if (!content || !content.trim()) {
+    throw new Error(`${provider} returned an empty response`);
+  }
+  return content;
+}
+
+// ============================================================================
+// Provider Health Cache
+// ============================================================================
+
+const PROVIDER_HEALTH_COOLDOWNS_MS = {
+  quota: 15 * 60 * 1000,
+  rate_limit: 2 * 60 * 1000,
+  timeout: 60 * 1000,
+  transient: 30 * 1000,
+} as const;
+
+const HEALTH_LOG_COOLDOWN_MS = 60 * 1000;
+
+interface ProviderHealthState {
+  unhealthyUntil: number;
+  reason: string;
+  lastLoggedAt: number;
+}
+
+class ProviderHealthCache {
+  private states = new Map<AIProvider, ProviderHealthState>();
+
+  isHealthy(provider: AIProvider): boolean {
+    const state = this.states.get(provider);
+    if (!state) return true;
+
+    if (Date.now() >= state.unhealthyUntil) {
+      this.states.delete(provider);
+      return true;
+    }
+
+    return false;
+  }
+
+  getReason(provider: AIProvider): string | undefined {
+    const state = this.states.get(provider);
+    if (!state) return undefined;
+
+    if (Date.now() >= state.unhealthyUntil) {
+      this.states.delete(provider);
+      return undefined;
+    }
+
+    return state.reason;
+  }
+
+  markFailure(provider: AIProvider, error: unknown): void {
+    const message = this._errorMessage(error);
+    const cooldownMs = this._cooldownForError(message);
+    this.states.set(provider, {
+      unhealthyUntil: Date.now() + cooldownMs,
+      reason: message,
+      lastLoggedAt: this.states.get(provider)?.lastLoggedAt ?? 0,
+    });
+  }
+
+  shouldLog(provider: AIProvider): boolean {
+    const state = this.states.get(provider);
+    if (!state) return true;
+
+    const now = Date.now();
+    if (now - state.lastLoggedAt < HEALTH_LOG_COOLDOWN_MS) {
+      return false;
+    }
+
+    state.lastLoggedAt = now;
+    return true;
+  }
+
+  private _cooldownForError(message: string): number {
+    const normalized = message.toLowerCase();
+    if (normalized.includes("quota") || normalized.includes("billing")) {
+      return PROVIDER_HEALTH_COOLDOWNS_MS.quota;
+    }
+    if (normalized.includes("rate limit") || normalized.includes("429")) {
+      return PROVIDER_HEALTH_COOLDOWNS_MS.rate_limit;
+    }
+    if (normalized.includes("abort") || normalized.includes("timeout")) {
+      return PROVIDER_HEALTH_COOLDOWNS_MS.timeout;
+    }
+    return PROVIDER_HEALTH_COOLDOWNS_MS.transient;
+  }
+
+  private _errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+const globalHealthRef = globalThis as unknown as {
+  __ONEATLAS_PROVIDER_HEALTH?: ProviderHealthCache;
+};
+
+const providerHealth =
+  globalHealthRef.__ONEATLAS_PROVIDER_HEALTH ??
+  (globalHealthRef.__ONEATLAS_PROVIDER_HEALTH = new ProviderHealthCache());
 
 // ============================================================================
 // OpenAI Provider
@@ -118,14 +240,14 @@ class OpenAIProvider {
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(`OpenAI API error: ${error.error?.message || "Unknown"}`);
+        throw new Error(`OpenAI API error: ${await readProviderError(response)}`);
       }
 
       const data = (await response.json()) as OpenAIResponse;
+      const content = requireContent(data.choices?.[0]?.message?.content, "openai");
 
       return {
-        content: data.choices[0].message.content,
+        content,
         model,
         provider: "openai",
         usage: {
@@ -203,16 +325,14 @@ class GroqProvider {
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(
-          `Groq API error: ${(error as Record<string, unknown>).error || "Unknown"}`
-        );
+        throw new Error(`Groq API error: ${await readProviderError(response)}`);
       }
 
       const data = (await response.json()) as GroqResponse;
+      const content = requireContent(data.choices?.[0]?.message?.content, "groq");
 
       return {
-        content: data.choices[0].message.content,
+        content,
         model,
         provider: "groq",
         usage: {
@@ -296,16 +416,17 @@ class GeminiProvider {
       );
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(
-          `Gemini API error: ${(error as Record<string, unknown>).error || "Unknown"}`
-        );
+        throw new Error(`Gemini API error: ${await readProviderError(response)}`);
       }
 
       const data = (await response.json()) as GeminiResponse;
+      const content = requireContent(
+        data.candidates?.[0]?.content?.parts?.map((part) => part.text).join(""),
+        "gemini"
+      );
 
       return {
-        content: data.candidates[0].content.parts[0].text,
+        content,
         model,
         provider: "gemini",
         usage: {
@@ -392,7 +513,7 @@ export class MultiProviderGateway implements AIGateway {
     if (provider === "openai") {
       return ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"];
     } else if (provider === "groq") {
-      return ["llama-3.1-70b-versatile", "mixtral-8x7b-32768"];
+      return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
     } else if (provider === "gemini") {
       return ["gemini-2.0-flash", "gemini-1.5-pro"];
     }
@@ -423,7 +544,7 @@ class MockGateway implements AIGateway {
     if (system.includes("Extract the app intent")) {
       const content = JSON.stringify({
         appName: "Mock Task Manager",
-        appType: "web",
+        appType: "project_management",
         features: ["tasks", "assignments", "notifications"],
         entities: ["Task", "User"],
         integrations_requested: ["slack"],
@@ -470,7 +591,7 @@ class MockGateway implements AIGateway {
     const spec = {
       metadata: {
         app_name: "Mock Task Manager",
-        app_type: "web",
+        app_type: "project_management",
         version: "1.0.0",
         created_at: new Date().toISOString(),
       },
@@ -518,19 +639,33 @@ export { MockGateway };
 // ============================================================================
 
 export class AIGatewayWithFallback implements AIGateway {
-  constructor(private gateway: MultiProviderGateway) {}
+  constructor(private gateway: AIGateway) {}
 
   async send(request: AIRequest): Promise<AIResponse> {
+    const attemptedProviders = new Set<AIProvider>();
+
     // If the requested provider is available, try it first
-    if (this.gateway.validateProvider(request.provider)) {
+    if (
+      this.gateway.validateProvider(request.provider) &&
+      providerHealth.isHealthy(request.provider)
+    ) {
       try {
-        return await this.gateway.send(request);
+        attemptedProviders.add(request.provider);
+        const response = await this.gateway.send(request);
+        return response;
       } catch (err) {
-        console.warn(`Provider ${request.provider} failed, will attempt fallback`, err);
+        providerHealth.markFailure(request.provider, err);
+        this._logProviderFailureOnce(
+          request.provider,
+          `Provider ${request.provider} failed; routing to fallback`,
+          err
+        );
         // fallthrough to fallback selection
       }
-    } else {
+    } else if (!this.gateway.validateProvider(request.provider)) {
       console.warn(`Provider ${request.provider} not configured, selecting fallback`);
+    } else {
+      this._logProviderSkipOnce(request.provider);
     }
 
     // Fallback selection order: prefer groq, then gemini, then openai
@@ -539,7 +674,7 @@ export class AIGatewayWithFallback implements AIGateway {
     // Default model mapping per provider (safe fallbacks)
     const DEFAULT_MODEL: Record<AIProvider, string> = {
       openai: "gpt-4o-mini",
-      groq: "llama-3.1-70b-versatile",
+      groq: "llama-3.3-70b-versatile",
       gemini: "gemini-2.0-flash",
       anthropic: "",
       mistral: "",
@@ -549,7 +684,13 @@ export class AIGatewayWithFallback implements AIGateway {
 
     let lastError: Error | null = null;
     for (const candidate of fallbackOrder) {
+      if (attemptedProviders.has(candidate)) continue;
       if (!this.gateway.validateProvider(candidate)) continue;
+      if (!providerHealth.isHealthy(candidate)) {
+        this._logProviderSkipOnce(candidate);
+        continue;
+      }
+
       const chosenModel = DEFAULT_MODEL[candidate] || request.model;
       try {
         const fallbackRequest: AIRequest = {
@@ -557,11 +698,18 @@ export class AIGatewayWithFallback implements AIGateway {
           provider: candidate,
           model: chosenModel,
         };
-        console.info(`Routing request to fallback provider ${candidate}/${chosenModel}`);
+        if (candidate !== request.provider) {
+          console.info(`Routing request to fallback provider ${candidate}/${chosenModel}`);
+        }
         return await this.gateway.send(fallbackRequest);
       } catch (err) {
+        providerHealth.markFailure(candidate, err);
         lastError = err as Error;
-        console.warn(`Fallback provider ${candidate} failed, trying next`, err);
+        this._logProviderFailureOnce(
+          candidate,
+          `Fallback provider ${candidate} failed; trying next provider`,
+          err
+        );
       }
     }
 
@@ -574,5 +722,20 @@ export class AIGatewayWithFallback implements AIGateway {
 
   getAvailableModels(provider: AIProvider): string[] {
     return this.gateway.getAvailableModels(provider);
+  }
+
+  private _logProviderFailureOnce(
+    provider: AIProvider,
+    message: string,
+    error: unknown
+  ): void {
+    if (!providerHealth.shouldLog(provider)) return;
+    console.warn(message, error);
+  }
+
+  private _logProviderSkipOnce(provider: AIProvider): void {
+    if (!providerHealth.shouldLog(provider)) return;
+    const reason = providerHealth.getReason(provider) ?? "temporary provider health cooldown";
+    console.info(`Skipping unhealthy provider ${provider}: ${reason}`);
   }
 }

@@ -53,7 +53,15 @@ export const DataSchemaSchema = z.object({
 
 export const AppIntentSchema = z.object({
   appName: z.string().min(1).max(200),
-  appType: z.enum(["web", "mobile", "desktop", "api", "hybrid"]),
+  appType: z.enum([
+    "crm",
+    "project_management",
+    "ecommerce",
+    "hr_tool",
+    "inventory",
+    "analytics",
+    "custom",
+  ]),
   features: z.array(z.string().min(1)).min(1),
   entities: z.array(z.string().min(1)).min(1),
   integrations_requested: z.array(z.string()).default([]),

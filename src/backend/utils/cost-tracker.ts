@@ -23,8 +23,8 @@ const COST_TABLE: Record<string, { input: number; output: number }> = {
   "gpt-4o": { input: 5.0, output: 15.0 },
   "gpt-4o-mini": { input: 0.15, output: 0.6 },
   "gpt-4-turbo": { input: 10.0, output: 30.0 },
-  "llama-3.1-70b-versatile": { input: 0.59, output: 0.79 },
-  "mixtral-8x7b-32768": { input: 0.27, output: 0.81 },
+  "llama-3.3-70b-versatile": { input: 0.59, output: 0.79 },
+  "llama-3.1-8b-instant": { input: 0.05, output: 0.08 },
   "gemini-2.0-flash": { input: 0.075, output: 0.3 },
   "gemini-1.5-pro": { input: 1.25, output: 5.0 },
 };

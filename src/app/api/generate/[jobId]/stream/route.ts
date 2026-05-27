@@ -32,43 +32,99 @@ export async function GET(
     const stream = new ReadableStream<Uint8Array>({
       start(controller: ReadableStreamDefaultController<Uint8Array>) {
         const encoder = new TextEncoder();
+        let isClosed = false;
+        let didCleanup = false;
+        let heartbeatInterval: ReturnType<typeof setInterval> | undefined;
+        let closeTimer: ReturnType<typeof setTimeout> | undefined;
+        let unsubscribe: (() => void) | undefined;
+
+        const cleanupOnce = (): void => {
+          if (didCleanup) return;
+          didCleanup = true;
+
+          if (closeTimer) {
+            clearTimeout(closeTimer);
+            closeTimer = undefined;
+          }
+
+          if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = undefined;
+          }
+
+          unsubscribe?.();
+          unsubscribe = undefined;
+        };
+
+        const safeClose = (): void => {
+          if (isClosed) return;
+          isClosed = true;
+          cleanupOnce();
+
+          try {
+            controller.close();
+          } catch (error) {
+            logger.warn("SSE stream close ignored after controller closed", {
+              jobId,
+              error: String(error),
+            });
+          }
+        };
+
+        const safeEnqueue = (message: string): void => {
+          if (isClosed) return;
+
+          try {
+            controller.enqueue(encoder.encode(message));
+          } catch (error) {
+            isClosed = true;
+            cleanupOnce();
+            logger.warn("SSE enqueue ignored after stream closed", {
+              jobId,
+              error: String(error),
+            });
+          }
+        };
+
+        cleanup = () => {
+          isClosed = true;
+          cleanupOnce();
+        };
 
         // Send existing events first
         const existingEvents = jobStore.getEvents(jobId);
         for (const event of existingEvents) {
           const message = formatSSEMessage(event);
-          controller.enqueue(encoder.encode(message));
+          safeEnqueue(message);
         }
 
         // If already completed, send final event and close
         if (jobState.job.status === "completed" || jobState.job.status === "failed") {
-          controller.close();
+          safeClose();
           return;
         }
 
         // Register for live events
-        const unsubscribe = jobStore.addEventListener(jobId, (event) => {
+        unsubscribe = jobStore.addEventListener(jobId, (event) => {
           const message = formatSSEMessage(event);
-          controller.enqueue(encoder.encode(message));
+          safeEnqueue(message);
 
           // Close stream when complete
           if (event.type === "generation_complete" || event.type === "stage_failed") {
-            setTimeout(() => controller.close(), 100);
+            if (!closeTimer) {
+              closeTimer = setTimeout(safeClose, 100);
+            }
           }
         });
 
         // Heartbeat to keep connection alive
-        const heartbeatInterval = setInterval(() => {
-          controller.enqueue(encoder.encode(": heartbeat\n\n"));
+        heartbeatInterval = setInterval(() => {
+          safeEnqueue(": heartbeat\n\n");
         }, 30000);
-
-        cleanup = () => {
-          clearInterval(heartbeatInterval);
-          unsubscribe();
-        };
       },
       cancel() {
         cleanup?.();
+        cleanup = undefined;
       },
     });
 
