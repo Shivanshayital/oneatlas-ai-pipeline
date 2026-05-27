@@ -127,6 +127,7 @@ export interface StageEvent {
     | "stage_complete"
     | "stage_failed"
     | "stage_retry"
+    | "stage_provider_usage"
     | "generation_complete";
   stage: PipelineStage;
   timestamp: string;
@@ -140,6 +141,13 @@ export interface ProviderUsage {
   model: string;
   latency_ms: number;
   tokens: TokenMetrics;
+  // Normalized camelCase token usage for frontend display
+  tokens_normalized?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    estimatedCost: number;
+  };
   cost_usd: number;
   attempt: number;
   timestamp: string;
@@ -280,6 +288,13 @@ export interface LatencyMetrics {
 
 export interface PipelineMetrics {
   tokens: TokenMetrics;
+  // Optional normalized tokens for UI convenience
+  tokens_normalized?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    estimatedCost: number;
+  };
   latency: LatencyMetrics;
   repair_attempts: number;
   successful_repairs: number;

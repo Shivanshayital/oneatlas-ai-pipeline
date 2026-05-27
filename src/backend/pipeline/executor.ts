@@ -159,6 +159,12 @@ export class PipelineExecutor {
         total_tokens: totals.total_tokens,
         estimated_cost: totals.total_cost_usd,
       },
+      tokens_normalized: {
+        promptTokens: totals.total_input_tokens,
+        completionTokens: totals.total_output_tokens,
+        totalTokens: totals.total_tokens,
+        estimatedCost: totals.total_cost_usd,
+      },
       latency: this.latencyMetrics,
       repair_attempts: repairs.length,
       successful_repairs: repairs.filter(
@@ -183,7 +189,7 @@ export class PipelineExecutor {
       response.usage.output_tokens
     );
 
-    jobStore.addProviderUsage(jobId, {
+    const providerUsage = {
       stage,
       provider,
       model,
@@ -194,10 +200,33 @@ export class PipelineExecutor {
         total_tokens: response.usage.total_tokens,
         estimated_cost: cost,
       },
+      tokens_normalized: {
+        promptTokens: response.usage.input_tokens,
+        completionTokens: response.usage.output_tokens,
+        totalTokens: response.usage.total_tokens,
+        estimatedCost: cost,
+      },
       cost_usd: cost,
       attempt,
       timestamp: new Date().toISOString(),
-    });
+    };
+
+    jobStore.addProviderUsage(jobId, providerUsage);
+
+    // Emit a lightweight provider usage event for live SSE consumption
+    try {
+      jobStore.addEvent(jobId, {
+        type: "stage_provider_usage",
+        stage,
+        timestamp: new Date().toISOString(),
+        data: {
+          provider_usage: providerUsage,
+        },
+      });
+    } catch (err) {
+      // Don't let SSE failures block pipeline
+      logger.warn("Failed to emit provider usage event", { error: String(err) });
+    }
 
     this._updateMetrics(jobId);
   }
@@ -312,6 +341,7 @@ export class PipelineExecutor {
 
       jobStore.setJobResult(jobId, result);
 
+      const totals = this.costTracker.getTotals();
       jobStore.addEvent(jobId, {
         type: "generation_complete",
         stage: "complete",
@@ -319,7 +349,13 @@ export class PipelineExecutor {
         data: {
           metrics: {
             latency: this.latencyMetrics,
-            tokens: this.costTracker.getTotals(),
+            tokens: totals,
+            tokens_normalized: {
+              promptTokens: totals.total_input_tokens,
+              completionTokens: totals.total_output_tokens,
+              totalTokens: totals.total_tokens,
+              estimatedCost: totals.total_cost_usd,
+            },
           },
         },
       });

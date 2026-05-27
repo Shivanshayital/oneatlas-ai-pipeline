@@ -1,8 +1,9 @@
-import { StageEvent, PipelineStage } from "@/backend/types";
+import { StageEvent, PipelineStage, ProviderUsage } from "@/backend/types";
 
 interface StageProgressPanelProps {
   events: StageEvent[];
   status: string;
+  providerHistory?: ProviderUsage[];
 }
 
 const STAGES: Array<{ id: PipelineStage; label: string }> = [
@@ -17,12 +18,13 @@ function formatDuration(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function stageState(stage: PipelineStage, events: StageEvent[], status: string) {
+function stageState(stage: PipelineStage, events: StageEvent[], status: string, providerHistory?: ProviderUsage[]) {
   const stageEvents = events.filter((event) => event.stage === stage);
   const started = stageEvents.find((event) => event.type === "stage_start");
   const completed = [...stageEvents].reverse().find((event) => event.type === "stage_complete");
   const failed = [...stageEvents].reverse().find((event) => event.type === "stage_failed");
   const providerEvent = stageEvents.find((event) => event.data?.provider || event.data?.model);
+  const latestUsage = providerHistory?.filter((u) => u.stage === stage).at(-1);
 
   const startedAt = started ? new Date(started.timestamp).getTime() : undefined;
   const endedAt = completed
@@ -42,8 +44,9 @@ function stageState(stage: PipelineStage, events: StageEvent[], status: string) 
   return {
     state,
     duration: startedAt && endedAt ? endedAt - startedAt : undefined,
-    provider: providerEvent?.data?.provider ? String(providerEvent.data.provider) : undefined,
-    model: providerEvent?.data?.model ? String(providerEvent.data.model) : undefined,
+    provider: providerEvent?.data?.provider ? String(providerEvent.data.provider) : latestUsage?.provider,
+    model: providerEvent?.data?.model ? String(providerEvent.data.model) : latestUsage?.model,
+    tokens: latestUsage?.tokens_normalized,
     error: failed?.error,
   };
 }
@@ -70,7 +73,7 @@ function stateBadge(state: string) {
   );
 }
 
-export default function StageProgressPanel({ events, status }: StageProgressPanelProps) {
+export default function StageProgressPanel({ events, status, providerHistory }: StageProgressPanelProps) {
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-950">
       <div className="flex items-center justify-between gap-4">
@@ -85,7 +88,7 @@ export default function StageProgressPanel({ events, status }: StageProgressPane
 
       <div className="mt-5 grid gap-3">
         {STAGES.map((stage) => {
-          const current = stageState(stage.id, events, status);
+          const current = stageState(stage.id, events, status, providerHistory);
           return (
             <div key={stage.id} className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-900/70">
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -112,6 +115,14 @@ export default function StageProgressPanel({ events, status }: StageProgressPane
                     ) : (
                       <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Waiting for execution.</p>
                     )}
+                    {current.tokens ? (
+                      <div className="mt-3 flex items-center gap-2">
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">P:{current.tokens.promptTokens}</span>
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">C:{current.tokens.completionTokens}</span>
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">T:{current.tokens.totalTokens}</span>
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-mono text-slate-700 ring-1 ring-slate-200 dark:bg-slate-950 dark:text-slate-300">${current.tokens.estimatedCost.toFixed(4)}</span>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>

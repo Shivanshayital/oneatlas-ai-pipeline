@@ -86,6 +86,16 @@ export default function HomePage() {
       setEvents((prev) => [...prev, payload]);
     });
 
+    source.addEventListener("stage_provider_usage", (event) => {
+      const payload = JSON.parse((event as MessageEvent).data) as StageEvent;
+      setEvents((prev) => [...prev, payload]);
+      // Append provider usage to local history for live UI updates
+      const providerUsage = (payload.data as any)?.provider_usage as ProviderUsage | undefined;
+      if (providerUsage) {
+        setProviderHistory((prev) => [...prev, providerUsage]);
+      }
+    });
+
     source.addEventListener("stage_failed", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as StageEvent;
       setEvents((prev) => [...prev, payload]);
@@ -165,7 +175,7 @@ export default function HomePage() {
         <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
           <div className="space-y-6">
             <PromptInput onSubmit={handleSubmit} disabled={isExecuting} />
-            <StageProgressPanel events={events} status={status} />
+            <StageProgressPanel events={events} status={status} providerHistory={providerHistory} />
             <AppSpecViewer spec={spec ?? undefined} />
           </div>
 
@@ -178,8 +188,10 @@ export default function HomePage() {
                 <SummaryItem label="Status" value={status} />
                 <SummaryItem label="Total latency" value={metrics ? `${(metrics.latency.total_ms / 1000).toFixed(1)}s` : "--"} />
                 <SummaryItem label="Repairs" value={String(repairs.length)} />
-                <SummaryItem label="Cost" value={metrics ? `$${metrics.tokens.estimated_cost.toFixed(4)}` : "--"} />
-                <SummaryItem label="Tokens" value={metrics ? metrics.tokens.total_tokens.toLocaleString() : "--"} />
+                <SummaryItem label="Cost" value={metrics ? `$${(metrics.tokens_normalized?.estimatedCost ?? metrics.tokens.estimated_cost).toFixed(4)}` : "--"} />
+                <SummaryItem label="Tokens" value={metrics ? ((metrics.tokens_normalized?.totalTokens ?? metrics.tokens.total_tokens).toLocaleString()) : "--"} />
+                <SummaryItem label="Prompt" value={metrics ? String(metrics.tokens_normalized?.promptTokens ?? metrics.tokens.input_tokens) : "--"} mono />
+                <SummaryItem label="Completion" value={metrics ? String(metrics.tokens_normalized?.completionTokens ?? metrics.tokens.output_tokens) : "--"} mono />
                 <SummaryItem
                   label="Provider"
                   value={providerHistory.at(-1)?.provider ?? "--"}
