@@ -28,8 +28,13 @@ export interface JobState {
 }
 
 export class JobStore {
-  private jobs: Map<string, JobState> = new Map();
-  private listeners: Map<string, Set<(event: StageEvent) => void>> = new Map();
+  private jobs: Map<string, JobState>;
+  private listeners: Map<string, Set<(event: StageEvent) => void>>;
+
+  constructor() {
+    this.jobs = new Map();
+    this.listeners = new Map();
+  }
 
   createJob(id: string, prompt: string): PipelineJob {
     const job: PipelineJob = {

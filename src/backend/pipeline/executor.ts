@@ -153,7 +153,10 @@ export class PipelineExecutor {
 
   private _updateMetrics(jobId: string): void {
     const totals = this.costTracker.getTotals();
-    const repairs = jobStore.getRepairs(jobId);
+    const state = jobStore.getJob(jobId);
+    if (!state) return; // Guard against state loss during long serverless execution
+
+    const repairs = state.repairs;
     const metrics: PipelineMetrics = {
       tokens: {
         input_tokens: totals.input_tokens,

@@ -14,11 +14,13 @@ interface Params {
 }
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<Params> }
 ): Promise<NextResponse> {
   try {
     const { jobId } = await params;
+    const { searchParams } = new URL(request.url);
+    const promptFallback = searchParams.get("prompt");
 
     // Validate UUID
     const uuidRegex =
@@ -27,9 +29,20 @@ export async function GET(
       return NextResponse.json({ error: "Invalid job ID" }, { status: 400 });
     }
 
-    const jobState = jobStore.getJob(jobId);
+    let jobState = jobStore.getJob(jobId);
+
+    // Self-healing for Vercel statelessness: If job missing but prompt provided, recreate it locally.
+    if (!jobState && promptFallback) {
+      logger.info("Rehydrating missing job state from prompt fallback", { jobId });
+      jobStore.createJob(jobId, promptFallback);
+      jobState = jobStore.getJob(jobId);
+    }
+
     if (!jobState) {
-      return NextResponse.json({ error: "Job not found" }, { status: 404 });
+      return NextResponse.json(
+        { error: "Job not found. Rehydration failed - please provide a prompt parameter." },
+        { status: 404 }
+      );
     }
 
     // Create readable stream for SSE

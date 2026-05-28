@@ -14,6 +14,7 @@ import {
 import { MultiProviderGateway, MODEL_ROUTING } from "../ai/gateway";
 import { validationEngine } from "../validation/engine";
 import { repairEngine } from "../repair/engine";
+import { jobStore } from "../store/job-store";
 import {
   AppIntentSchema,
   DataSchemaSchema,
@@ -105,8 +106,6 @@ Return ONLY a JSON object matching this structure:
 
 export class PipelineOrchestrator {
   private gateway: MultiProviderGateway;
-  private jobs: Map<string, PipelineJob> = new Map();
-  private metrics: Map<string, PipelineMetrics> = new Map();
   private eventListeners: Array<(event: StageEvent) => void> = [];
 
   constructor(gateway: MultiProviderGateway) {
@@ -119,21 +118,8 @@ export class PipelineOrchestrator {
 
   async processPrompt(prompt: string): Promise<string> {
     const jobId = uuidv4();
-    const job: PipelineJob = {
-      id: jobId,
-      prompt,
-      status: "processing",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    this.jobs.set(jobId, job);
-    this.metrics.set(jobId, {
-      tokens: { input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost: 0 },
-      latency: { intent_stage_ms: 0, schema_stage_ms: 0, spec_stage_ms: 0, total_ms: 0 },
-      repair_attempts: 0,
-      successful_repairs: 0,
-    });
+    const job = jobStore.createJob(jobId, prompt);
+    jobStore.updateJobStatus(jobId, "processing");
 
     try {
       const result = await this._runPipeline(prompt, jobId);
@@ -161,16 +147,16 @@ export class PipelineOrchestrator {
   }
 
   getJob(jobId: string): PipelineJob | undefined {
-    return this.jobs.get(jobId);
+    return jobStore.getJob(jobId)?.job;
   }
 
   getMetrics(jobId: string): PipelineMetrics | undefined {
-    return this.metrics.get(jobId);
+    return jobStore.getMetrics(jobId);
   }
 
   private async _runPipeline(prompt: string, jobId: string): Promise<JobResult> {
-    const repairLogs: RepairLog[] = [];
-    const metrics = this.metrics.get(jobId)!;
+    const state = jobStore.getJob(jobId)!;
+    const metrics = state.metrics;
     const totalStartTime = Date.now();
 
     // ============ Stage 1: Intent Extraction ============
