@@ -245,7 +245,11 @@ export class PipelineExecutor {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < routes.length; attempt += 1) {
-      const [provider, model] = routes[attempt].split("/") as [AIProvider, string];
+      const route = routes[attempt];
+      const slashIndex = route.indexOf("/");
+      const provider = route.substring(0, slashIndex) as AIProvider;
+      const model = route.substring(slashIndex + 1);
+      
       try {
         const response = await this.gateway.send({
           provider, // The actual provider to use

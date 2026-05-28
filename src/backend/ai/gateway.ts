@@ -6,21 +6,21 @@ import { AIProvider, AIRequest, AIResponse } from "../types";
 
 export const MODEL_ROUTING = {
   intent: {
-    primary: "openrouter/google/gemini-2.5-flash",
-    fallback: "openrouter/deepseek/deepseek-chat",
-    secondaryFallback: "openrouter/meta-llama/llama-3.3-70b-instruct",
+    primary: "openrouter/meta-llama/llama-3.1-8b-instruct:free",
+    fallback: "groq/llama-3.3-70b-versatile",
+    secondaryFallback: "openrouter/deepseek/deepseek-chat",
     tertiaryFallback: "openrouter/openai/gpt-4o-mini",
   },
   schema: {
-    primary: "openrouter/google/gemini-2.5-flash",
-    fallback: "openrouter/deepseek/deepseek-chat",
-    secondaryFallback: "openrouter/meta-llama/llama-3.3-70b-instruct",
+    primary: "openrouter/meta-llama/llama-3.1-8b-instruct:free",
+    fallback: "groq/llama-3.3-70b-versatile",
+    secondaryFallback: "openrouter/deepseek/deepseek-chat",
     tertiaryFallback: "openrouter/openai/gpt-4o-mini",
   },
   spec: {
-    primary: "openrouter/google/gemini-2.5-flash",
-    fallback: "openrouter/deepseek/deepseek-chat",
-    secondaryFallback: "openrouter/meta-llama/llama-3.3-70b-instruct",
+    primary: "openrouter/meta-llama/llama-3.1-8b-instruct:free",
+    fallback: "groq/llama-3.3-70b-versatile",
+    secondaryFallback: "openrouter/deepseek/deepseek-chat",
     tertiaryFallback: "openrouter/openai/gpt-4o-mini",
   },
 } as const;
@@ -747,9 +747,10 @@ export class MultiProviderGateway implements AIGateway {
     }
     if (provider === "openrouter") {
       return [
-        "google/gemini-2.5-flash",
+        "meta-llama/llama-3.1-8b-instruct:free",
         "deepseek/deepseek-chat",
         "meta-llama/llama-3.3-70b-instruct",
+        "google/gemini-2.5-flash",
         "openai/gpt-4o-mini"
       ];
     }
@@ -927,8 +928,8 @@ export class AIGatewayWithFallback implements AIGateway {
       this._logProviderSkipOnce(request.provider);
     }
 
-    // Fallback selection order: Gemini -> OpenRouter -> Groq -> DeepSeek -> OpenAI
-    const fallbackOrder: AIProvider[] = ["gemini", "openrouter", "groq", "deepseek", "openai"];
+    // Fallback selection order: OpenRouter -> Groq -> DeepSeek -> Gemini -> OpenAI
+    const fallbackOrder: AIProvider[] = ["openrouter", "groq", "deepseek", "gemini", "openai"];
 
     // Default model mapping per provider (safe fallbacks)
     const DEFAULT_MODEL: Record<AIProvider, string> = {
@@ -938,7 +939,7 @@ export class AIGatewayWithFallback implements AIGateway {
       openai: "gpt-4o-mini", // OpenAI's cost-effective model
       anthropic: "",
       mistral: "",
-      openrouter: "google/gemini-2.5-flash", // Primary OpenRouter fallback model
+      openrouter: "meta-llama/llama-3.1-8b-instruct:free", // Primary OpenRouter fallback model
     };
 
     let lastError: Error | null = null;
