@@ -219,7 +219,7 @@ export class PipelineOrchestrator {
       intent,
       schema,
       spec,
-      repairs_applied: repairLogs,
+      repairs_applied: [],
     };
   }
 
