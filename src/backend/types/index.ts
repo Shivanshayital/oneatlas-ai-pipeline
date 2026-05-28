@@ -224,7 +224,8 @@ export type RepairStrategy =
   | "structural_repair"
   | "field_repair"
   | "consistency_repair"
-  | "retry_with_different_model";
+  | "retry_with_different_model"
+  | "fallback_generation"; // Added for emergency fallback AppSpec generation
 
 export interface RepairLog {
   timestamp: string;

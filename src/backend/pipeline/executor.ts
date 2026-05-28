@@ -681,12 +681,14 @@ if (
     const stageStartTime = Date.now();
     const controller = new AbortController();
     let didTimeout = false;
+    let degradedMode = false;
     const timeoutId = setTimeout(() => {
       didTimeout = true;
       logger.warn("AppSpec timeout", {
         jobId,
         timeoutMs: APP_SPEC_STAGE_TIMEOUT_MS,
       });
+      // COMMENT: Abort the ongoing fetch requests to prevent hanging connections.
       controller.abort(); // Abort the ongoing fetch requests
     }, APP_SPEC_STAGE_TIMEOUT_MS);
 
@@ -694,10 +696,10 @@ if (
   const schemaJson = JSON.stringify(schema, null, 2);
 
       // COMMENT: 'generateStructuredOutput' was an invalid method as it's not defined in the AIGateway interface.
-      // We use the existing '_sendWithRetry' helper to correctly route the request through the gateway API.
+      // We use the existing '_sendWithRetry' helper to correctly route the request through the gateway API,
       // This preserves routing, fallback logic, and usage tracking.
       // Structured JSON parsing is safely handled by 'extractJSON', which extracts and repairs JSON from LLM content.
-      const response = await this._sendWithRetry(
+      const response = await this._sendWithRetry( // This call can throw if all providers fail
         jobId,
         "spec",
         [
@@ -807,10 +809,35 @@ if (
       return spec;
     } catch (error) {
       const timedOut = didTimeout || controller.signal.aborted;
-      const errorMsg = timedOut
-        ? `AppSpec stage exceeded ${APP_SPEC_STAGE_TIMEOUT_MS}ms`
-        : String(error);
+      const errorMsg = String(error);
+      let finalSpec: AppSpec;
 
+      // COMMENT: Free providers can be unstable due to rate limits, quotas, or temporary unavailability.
+      // Graceful degradation is crucial to prevent the entire pipeline from failing and to provide a usable UX.
+      // If all AI providers fail, we generate a minimal fallback AppSpec to ensure the pipeline always completes.
+      // This fallback improves UX by giving the user something to work with, even if it's not ideal.
+      const providerExhausted = errorMsg.includes("No available providers could fulfill the request");
+
+      if (timedOut || providerExhausted) {
+        degradedMode = true;
+        logger.warn(`[Executor] AppSpec stage failed due to ${timedOut ? "timeout" : "provider exhaustion"}. Generating fallback AppSpec.`, { jobId, error: errorMsg });
+        finalSpec = this._buildPartialSpec(intent, schema, {});
+        await jobStore.addRepair(jobId, {
+          timestamp: new Date().toISOString(),
+          stage: "spec",
+          strategy: "fallback_generation",
+          error: timedOut ? `AppSpec stage timed out after ${APP_SPEC_STAGE_TIMEOUT_MS}ms` : errorMsg,
+          action: "Generated minimal fallback AppSpec due to AI provider exhaustion or timeout",
+          outcome: "partial",
+          details: { degraded_mode: true, timed_out: timedOut, provider_exhausted: providerExhausted },
+        });
+      } else {
+        // If it's a different, unhandled error, re-throw it after logging.
+        await jobStore.setJobError(jobId, errorMsg);
+        await jobStore.addEvent(jobId, { type: "stage_failed", stage: "spec", timestamp: new Date().toISOString(), error: errorMsg });
+        throw error;
+      }
+      
       if (timedOut) {
         // If timeout, build and save a partial spec
         const partialSpec = this._buildPartialSpec(intent, schema, {});
@@ -821,26 +848,33 @@ if (
           spec: partialSpec,
           repairs_applied: await jobStore.getRepairs(jobId),
         });
+      } else {
+        // If provider exhausted, but not timed out, we still have a finalSpec from above
+        await jobStore.setStageOutput(jobId, "spec", finalSpec);
+        await jobStore.setPartialJobResult(jobId, {
+          intent,
+          schema,
+          spec: finalSpec,
+          repairs_applied: await jobStore.getRepairs(jobId),
+        });
       }
 
-      // Record error and emit failed event
-      await jobStore.setJobError(jobId, errorMsg);
       await jobStore.addEvent(jobId, {
-        type: "stage_failed",
+        type: "stage_complete", // Mark as complete, but degraded
         stage: "spec",
         timestamp: new Date().toISOString(),
-        error: errorMsg,
-        data: {
-          timed_out: timedOut,
-          partial_spec_available: timedOut,
-        },
+        latency_ms: Date.now() - stageStartTime,
+        data: { pages: finalSpec.pages.length, endpoints: finalSpec.api_endpoints.length, workflows: finalSpec.workflows.length, degraded_mode: degradedMode },
       });
-      logger.error("Stage failure", error instanceof Error ? error : new Error(errorMsg), {
+
+      logger.warn("AppSpec stage completed in degraded mode.", {
         jobId,
         stage: "spec",
-        timedOut,
+        latencyMs: Date.now() - stageStartTime,
+        degradedMode,
       });
-      throw error;
+
+      return finalSpec; // Return the degraded/fallback spec
     } finally {
       clearTimeout(timeoutId);
     }
