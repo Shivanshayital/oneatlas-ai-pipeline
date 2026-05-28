@@ -20,6 +20,8 @@ export async function POST(
 ): Promise<NextResponse> {
   try {
     const { jobId } = await params;
+    const { searchParams } = new URL(request.url);
+    const promptFallback = searchParams.get("prompt");
 
     // Validate UUID
     const uuidRegex =
@@ -38,9 +40,20 @@ export async function POST(
       );
     }
 
-    const jobState = jobStore.getJob(jobId);
+    let jobState = jobStore.getJob(jobId);
+
+    // Self-healing for Vercel statelessness
+    if (!jobState && promptFallback) {
+      logger.info("Rehydrating job for repair request", { jobId });
+      jobStore.createJob(jobId, promptFallback);
+      jobState = jobStore.getJob(jobId);
+    }
+
     if (!jobState) {
-      return NextResponse.json({ error: "Job not found" }, { status: 404 });
+      return NextResponse.json(
+        { error: "Job not found. Rehydration failed - please provide a 'prompt' query parameter." },
+        { status: 404 }
+      );
     }
 
     // Get stage output

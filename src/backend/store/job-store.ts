@@ -11,6 +11,7 @@ import {
   ValidationSnapshot,
   AIProvider,
 } from "../types";
+import { logger } from "../logging/logger";
 
 // ============================================================================
 // Job Store - In-Memory State Management
@@ -73,11 +74,25 @@ export class JobStore {
 
     this.listeners.set(id, new Set());
 
+    logger.info(`[JobStore] Initialized job: ${id}`, {
+      activeJobs: this.jobs.size,
+      prompt_preview: prompt.substring(0, 50) + "..."
+    });
+
     return job;
   }
 
   getJob(id: string): JobState | undefined {
-    return this.jobs.get(id);
+    const state = this.jobs.get(id);
+    if (!state) {
+      logger.warn(`[JobStore] Job NOT FOUND: ${id}`, {
+        availableIds: Array.from(this.jobs.keys()),
+        instanceCount: this.jobs.size
+      });
+    } else {
+      logger.debug(`[JobStore] Job retrieved: ${id}`);
+    }
+    return state;
   }
 
   updateJobStatus(
@@ -317,13 +332,13 @@ export class JobStore {
 
 // Ensure a single JobStore instance across module reloads (Next.js dev hot reloads)
 const globalRef = globalThis as unknown as {
-  __ONEATLAS_JOB_STORE?: JobStore;
+  __jobStore?: JobStore;
 };
-if (!globalRef.__ONEATLAS_JOB_STORE) {
-  globalRef.__ONEATLAS_JOB_STORE = new JobStore();
+if (!globalRef.__jobStore) {
+  globalRef.__jobStore = new JobStore();
 }
 
-export const jobStore: JobStore = globalRef.__ONEATLAS_JOB_STORE;
+export const jobStore: JobStore = globalRef.__jobStore;
 
 function quotaForProvider(provider: AIProvider): number | undefined {
   const quotas: Partial<Record<AIProvider, number>> = {

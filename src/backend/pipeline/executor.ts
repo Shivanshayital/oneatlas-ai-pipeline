@@ -315,9 +315,16 @@ export class PipelineExecutor {
 
   async executePipeline(jobId: string, prompt: string): Promise<void> { // Explicit return type
     const totalStartTime = Date.now();
+    
+    const state = jobStore.getJob(jobId);
+    if (!state) {
+      logger.error(`[Executor] Aborting execution: Job ${jobId} not found in store`);
+      return;
+    }
 
     try {
       jobStore.updateJobStatus(jobId, "processing");
+      logger.info(`[Executor] Beginning pipeline stages for: ${jobId}`);
 
       // Stage 1: Intent Extraction
       const intentStartTime = Date.now();
@@ -461,7 +468,8 @@ export class PipelineExecutor {
       }
 
       const intent = AppIntentSchema.parse(repairedData) as AppIntent;
-      jobStore.setStageOutput(jobId, "intent", intent);
+      // Persist output immediately to survive instance transitions
+      jobStore.setStageOutput(jobId, "intent", intent); 
 
       jobStore.addEvent(jobId, {
         type: "stage_complete",
@@ -586,6 +594,7 @@ export class PipelineExecutor {
       }
 
       const schema = DataSchemaSchema.parse(repairedSchemaData) as DataSchema;
+      // Persist output immediately
       jobStore.setStageOutput(jobId, "schema", schema);
 
       jobStore.addEvent(jobId, {
@@ -713,6 +722,7 @@ export class PipelineExecutor {
       }
 
       const spec = AppSpecSchema.parse(repairedSpec) as AppSpec;
+      // Persist output immediately
       jobStore.setStageOutput(jobId, "spec", spec);
 
       jobStore.addEvent(jobId, {

@@ -19,6 +19,8 @@ export async function GET(
 ): Promise<NextResponse> {
   try {
     const { jobId } = await params;
+    logger.info(`[SSE] Connection requested for job: ${jobId}`);
+    
     const { searchParams } = new URL(request.url);
     const promptFallback = searchParams.get("prompt");
 
@@ -31,9 +33,9 @@ export async function GET(
 
     let jobState = jobStore.getJob(jobId);
 
-    // Self-healing for Vercel statelessness: If job missing but prompt provided, recreate it locally.
+    // Self-healing for Vercel statelessness
     if (!jobState && promptFallback) {
-      logger.info("Rehydrating missing job state from prompt fallback", { jobId });
+      logger.info(`[SSE] Rehydrating missing job state: ${jobId}`);
       jobStore.createJob(jobId, promptFallback);
       jobState = jobStore.getJob(jobId);
     }
@@ -142,6 +144,8 @@ export async function GET(
         }, 30000);
 
         if (jobStore.startProcessing(jobId)) {
+          logger.info(`[SSE] Starting pipeline execution for job: ${jobId}`);
+          
           const config = loadConfig();
           const gateway = initializePipeline(config);
           const executor = new PipelineExecutor(gateway);
