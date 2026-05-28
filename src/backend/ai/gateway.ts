@@ -6,22 +6,22 @@ import { AIProvider, AIRequest, AIResponse } from "../types";
 
 export const MODEL_ROUTING = {
   intent: {
-    primary: "openrouter/meta-llama/llama-3.1-8b-instruct:free",
-    fallback: "groq/llama-3.3-70b-versatile",
-    secondaryFallback: "openrouter/deepseek/deepseek-chat",
-    tertiaryFallback: "openrouter/openai/gpt-4o-mini",
+    primary: "openrouter/openai/gpt-oss-20b:free",
+    fallback: "openrouter/google/gemini-2.0-flash-exp:free",
+    secondaryFallback: "groq/llama-3.3-70b-versatile",
+    tertiaryFallback: "deepseek/deepseek-chat",
   },
   schema: {
-    primary: "openrouter/meta-llama/llama-3.1-8b-instruct:free",
-    fallback: "groq/llama-3.3-70b-versatile",
-    secondaryFallback: "openrouter/deepseek/deepseek-chat",
-    tertiaryFallback: "openrouter/openai/gpt-4o-mini",
+    primary: "openrouter/openai/gpt-oss-20b:free",
+    fallback: "openrouter/google/gemini-2.0-flash-exp:free",
+    secondaryFallback: "groq/llama-3.3-70b-versatile",
+    tertiaryFallback: "deepseek/deepseek-chat",
   },
   spec: {
-    primary: "openrouter/meta-llama/llama-3.1-8b-instruct:free",
-    fallback: "groq/llama-3.3-70b-versatile",
-    secondaryFallback: "openrouter/deepseek/deepseek-chat",
-    tertiaryFallback: "openrouter/openai/gpt-4o-mini",
+    primary: "openrouter/openai/gpt-oss-20b:free",
+    fallback: "openrouter/google/gemini-2.0-flash-exp:free",
+    secondaryFallback: "groq/llama-3.3-70b-versatile",
+    tertiaryFallback: "deepseek/deepseek-chat",
   },
 } as const;
 
@@ -57,7 +57,7 @@ interface ProviderRegistry {
 
 export interface DetailedProviderError {
   message: string;
-  type: 'rate_limit' | 'quota' | 'timeout' | 'context_length' | 'auth' | 'balance' | 'unknown';
+  type: 'rate_limit' | 'quota' | 'timeout' | 'context_length' | 'auth' | 'balance' | 'unavailable' | 'unknown';
   status: number;
 }
 
@@ -81,6 +81,7 @@ async function readProviderError(response: Response): Promise<DetailedProviderEr
   else if (response.status === 401 || response.status === 403) type = 'auth';
   else if (normalized.includes("context_length") || normalized.includes("too many tokens") || response.status === 413) type = 'context_length';
   else if (normalized.includes("timeout") || normalized.includes("abort")) type = 'timeout';
+  else if (normalized.includes("no endpoints found") || normalized.includes("model not found") || normalized.includes("unavailable") || response.status === 404) type = 'unavailable';
 
   return {
     message: message.slice(0, 500),
@@ -747,11 +748,11 @@ export class MultiProviderGateway implements AIGateway {
     }
     if (provider === "openrouter") {
       return [
-        "meta-llama/llama-3.1-8b-instruct:free",
+        "openai/gpt-oss-20b:free",
+        "google/gemini-2.0-flash-exp:free",
         "deepseek/deepseek-chat",
         "meta-llama/llama-3.3-70b-instruct",
-        "google/gemini-2.5-flash",
-        "openai/gpt-4o-mini"
+        "openai/gpt-4o-mini",
       ];
     }
     return [];
@@ -939,7 +940,7 @@ export class AIGatewayWithFallback implements AIGateway {
       openai: "gpt-4o-mini", // OpenAI's cost-effective model
       anthropic: "",
       mistral: "",
-      openrouter: "meta-llama/llama-3.1-8b-instruct:free", // Primary OpenRouter fallback model
+      openrouter: "openai/gpt-oss-20b:free", // Primary OpenRouter fallback model
     };
 
     let lastError: Error | null = null;

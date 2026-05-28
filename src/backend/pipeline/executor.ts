@@ -250,6 +250,8 @@ export class PipelineExecutor {
       const provider = route.substring(0, slashIndex) as AIProvider;
       const model = route.substring(slashIndex + 1);
       
+      logger.info(`[Executor] Attempting stage ${stage} (attempt ${attempt + 1}) using ${provider}/${model}`);
+
       try {
         const response = await this.gateway.send({
           provider, // The actual provider to use
@@ -287,9 +289,12 @@ export class PipelineExecutor {
           });
         }
 
+        logger.info(`[Executor] Successfully completed stage ${stage} with ${response.provider}/${response.model}`);
         return response;
       } catch (error) {
         const errorMessage = String(error);
+        logger.warn(`[Executor] Stage ${stage} failed with ${provider}/${model}: ${errorMessage}. Trying fallback...`);
+
         jobStore.addRetryHistory(jobId, {
           stage,
           attempt: attempt + 1,

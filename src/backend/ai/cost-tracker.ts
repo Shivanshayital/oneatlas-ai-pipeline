@@ -17,7 +17,8 @@ const TOKEN_PRICING_PER_MILLION_INPUT_USD: Record<string, number> = {
   "gemini/gemini-2.0-flash-exp": 0.35, // Estimate
   "deepseek/deepseek-chat": 0.10, // Estimate, DeepSeek pricing is per 1M tokens
   "deepseek/deepseek-coder": 0.10, // Estimate
-  "openrouter/meta-llama/llama-3.1-8b-instruct:free": 0.01,
+  "openrouter/openai/gpt-oss-20b:free": 0.01,
+  "openrouter/google/gemini-2.0-flash-exp:free": 0.01,
   "openrouter/google/gemini-2.5-flash": 0.35,
   "openrouter/deepseek/deepseek-chat": 0.15,
   "openrouter/meta-llama/llama-3.3-70b-instruct": 0.60,
@@ -37,7 +38,8 @@ const TOKEN_PRICING_PER_MILLION_OUTPUT_USD: Record<string, number> = {
   "gemini/gemini-2.0-flash-exp": 0.70, // Estimate
   "deepseek/deepseek-chat": 0.10, // Estimate
   "deepseek/deepseek-coder": 0.10, // Estimate
-  "openrouter/meta-llama/llama-3.1-8b-instruct:free": 0.01,
+  "openrouter/openai/gpt-oss-20b:free": 0.01,
+  "openrouter/google/gemini-2.0-flash-exp:free": 0.01,
   "openrouter/google/gemini-2.5-flash": 0.70,
   "openrouter/deepseek/deepseek-chat": 0.60,
   "openrouter/meta-llama/llama-3.3-70b-instruct": 0.60,
