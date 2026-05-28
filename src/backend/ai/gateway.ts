@@ -33,6 +33,9 @@ export interface AIGateway {
 }
 
 type FailureType = DetailedProviderError["type"] | "transient";
+const PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
+const OPENROUTER_DISCOVERY_TIMEOUT_MS = 5_000;
+const MAX_PROVIDER_ATTEMPTS = 5;
 
 // ============================================================================
 // Provider Configuration
@@ -417,7 +420,7 @@ export function markModelFailure(provider: AIProvider, model: string, error: unk
   return type;
 }
 
-export async function getHealthyOpenRouterModels(): Promise<string[]> {
+export async function getHealthyOpenRouterModels(abortSignal?: AbortSignal): Promise<string[]> {
   const cached = globalHealthRef.__ONEATLAS_OPENROUTER_MODEL_CACHE;
   const now = Date.now();
   let discovered = cached && now - cached.fetchedAt < OPENROUTER_DISCOVERY_CACHE_MS
@@ -425,11 +428,13 @@ export async function getHealthyOpenRouterModels(): Promise<string[]> {
     : OPENROUTER_SEED_MODELS;
 
   if (!cached || now - cached.fetchedAt >= OPENROUTER_DISCOVERY_CACHE_MS) {
+    const discoveryAbort = createAbortSignal(OPENROUTER_DISCOVERY_TIMEOUT_MS, abortSignal);
     try {
       const response = await fetch("https://openrouter.ai/api/v1/models", {
         headers: process.env.OPENROUTER_API_KEY
           ? { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` }
           : undefined,
+        signal: discoveryAbort.signal,
       });
 
       if (response.ok) {
@@ -458,6 +463,8 @@ export async function getHealthyOpenRouterModels(): Promise<string[]> {
       logger.warn("OpenRouter model discovery failed; using cached seed models", {
         error: error instanceof Error ? error.message : String(error),
       });
+    } finally {
+      discoveryAbort.cleanup();
     }
   }
 
@@ -468,10 +475,12 @@ export async function getHealthyOpenRouterModels(): Promise<string[]> {
     })
     .sort((a, b) => getModelHealthScore("openrouter", b) - getModelHealthScore("openrouter", a));
 
-  return healthyModels.length > 0 ? healthyModels : OPENROUTER_SEED_MODELS.filter((model) => {
+  const boundedHealthyModels = healthyModels.slice(0, 5);
+
+  return boundedHealthyModels.length > 0 ? boundedHealthyModels : OPENROUTER_SEED_MODELS.filter((model) => {
     const health = getMutableModelHealth("openrouter", model);
     return !health.cooldownUntil || Date.now() >= health.cooldownUntil;
-  });
+  }).slice(0, 5);
 }
 
 // ============================================================================
@@ -518,7 +527,8 @@ class OpenAIProvider {
     messages: Array<{ role: string; content: string }>,
     temperature: number | undefined, // Explicitly type temperature
     max_tokens?: number,
-    timeout: number = 30000
+    timeout: number = PROVIDER_REQUEST_TIMEOUT_MS,
+    externalSignal?: AbortSignal
   ): Promise<AIResponse> {
     const startTime = Date.now();
 
@@ -529,8 +539,7 @@ class OpenAIProvider {
       max_tokens: max_tokens ?? 1024,
     };
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const { signal, cleanup } = createAbortSignal(Math.min(timeout, PROVIDER_REQUEST_TIMEOUT_MS), externalSignal);
 
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -540,7 +549,7 @@ class OpenAIProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal,
       });
 
       if (!response.ok) {
@@ -563,7 +572,7 @@ class OpenAIProvider {
         latency_ms: Date.now() - startTime,
       };
     } finally {
-      clearTimeout(timeoutId);
+      cleanup();
     }
   }
 }
@@ -604,7 +613,8 @@ class GroqProvider {
     messages: Array<{ role: string; content: string }>,
     temperature: number | undefined, // Explicitly type temperature
     max_tokens?: number,
-    timeout: number = 30000
+    timeout: number = PROVIDER_REQUEST_TIMEOUT_MS,
+    externalSignal?: AbortSignal
   ): Promise<AIResponse> {
     const startTime = Date.now();
 
@@ -615,8 +625,7 @@ class GroqProvider {
       max_tokens: max_tokens ?? 1024,
     };
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const { signal, cleanup } = createAbortSignal(Math.min(timeout, PROVIDER_REQUEST_TIMEOUT_MS), externalSignal);
 
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -626,7 +635,7 @@ class GroqProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal,
       });
 
       if (!response.ok) {
@@ -649,7 +658,7 @@ class GroqProvider {
         latency_ms: Date.now() - startTime,
       };
     } finally {
-      clearTimeout(timeoutId);
+      cleanup();
     }
   }
 }
@@ -690,7 +699,8 @@ class GeminiProvider {
     messages: Array<{ role: string; content: string }>,
     temperature: number | undefined, // Explicitly type temperature
     max_tokens?: number,
-    timeout: number = 30000
+    timeout: number = PROVIDER_REQUEST_TIMEOUT_MS,
+    externalSignal?: AbortSignal
   ): Promise<AIResponse> {
     const contents: GeminiContent[] = messages.map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
@@ -716,8 +726,7 @@ class GeminiProvider {
     let lastError: Error | null = null;
     for (const candidateModel of candidateModels) {
       const startTime = Date.now();
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
+      const { signal, cleanup } = createAbortSignal(Math.min(timeout, PROVIDER_REQUEST_TIMEOUT_MS), externalSignal);
 
       try {
         const response = await fetch(
@@ -726,7 +735,7 @@ class GeminiProvider {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
-            signal: controller.signal,
+            signal,
           }
         );
 
@@ -759,7 +768,7 @@ class GeminiProvider {
           latency_ms: Date.now() - startTime,
         };
       } finally {
-        clearTimeout(timeoutId);
+        cleanup();
       }
     }
 
@@ -785,7 +794,8 @@ class OpenRouterProvider {
     messages: Array<{ role: string; content: string }>,
     temperature: number | undefined,
     max_tokens?: number,
-    timeout: number = 40000
+    timeout: number = PROVIDER_REQUEST_TIMEOUT_MS,
+    externalSignal?: AbortSignal
   ): Promise<AIResponse> {
     const startTime = Date.now();
 
@@ -796,8 +806,7 @@ class OpenRouterProvider {
       max_tokens: max_tokens ?? 1024,
     };
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const { signal, cleanup } = createAbortSignal(Math.min(timeout, PROVIDER_REQUEST_TIMEOUT_MS), externalSignal);
 
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -809,7 +818,7 @@ class OpenRouterProvider {
           "X-Title": "OneAtlas AI Pipeline",
         },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal,
       });
 
       if (!response.ok) {
@@ -832,7 +841,7 @@ class OpenRouterProvider {
         latency_ms: Date.now() - startTime,
       };
     } finally {
-      clearTimeout(timeoutId);
+      cleanup();
     }
   }
 }
@@ -873,7 +882,8 @@ class DeepSeekProvider {
     messages: Array<{ role: string; content: string }>,
     temperature: number | undefined, // Explicitly type temperature
     max_tokens?: number,
-    timeout: number = 33000 // DeepSeek can sometimes be a bit slower
+    timeout: number = PROVIDER_REQUEST_TIMEOUT_MS,
+    externalSignal?: AbortSignal
   ): Promise<AIResponse> {
     const startTime = Date.now();
 
@@ -884,8 +894,7 @@ class DeepSeekProvider {
       max_tokens: max_tokens ?? 2048,
     };
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const { signal, cleanup } = createAbortSignal(Math.min(timeout, PROVIDER_REQUEST_TIMEOUT_MS), externalSignal);
 
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -895,7 +904,7 @@ class DeepSeekProvider {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
-        signal: controller.signal,
+        signal,
       });
 
       if (!response.ok) {
@@ -918,7 +927,7 @@ class DeepSeekProvider {
         latency_ms: Date.now() - startTime,
       };
     } finally {
-      clearTimeout(timeoutId);
+      cleanup();
     }
   }
 }
@@ -961,50 +970,74 @@ export class MultiProviderGateway implements AIGateway {
       );
     }
 
-    if (request.provider === "openai") {
-      return (provider as OpenAIProvider).send( // Cast to specific provider
-        request.model,
-        request.messages,
-        request.temperature,
-        request.max_tokens,
-        10000
-      );
-    }
-    if (request.provider === "groq") { // Use if for type narrowing
-      return (provider as GroqProvider).send( // Cast to specific provider
-        request.model,
-        request.messages,
-        request.temperature,
-        request.max_tokens,
-        10000
-      );
-    }
-    if (request.provider === "gemini") { // Use if for type narrowing
-      return (provider as GeminiProvider).send( // Cast to specific provider
-        request.model,
-        request.messages,
-        request.temperature,
-        request.max_tokens,
-        10000
-      );
-    }
-    if (request.provider === "deepseek") { // Use if for type narrowing
-      return (provider as DeepSeekProvider).send( // Cast to specific provider
-        request.model,
-        request.messages,
-        request.temperature,
-        request.max_tokens,
-        10000
-      );
-    }
-    if (request.provider === "openrouter") {
-      return (provider as OpenRouterProvider).send(
-        request.model,
-        request.messages,
-        request.temperature,
-        request.max_tokens,
-        40000
-      );
+    logger.info("Provider start", {
+      stage: request.stage,
+      provider: request.provider,
+      model: request.model,
+      timeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+    });
+
+    try {
+      if (request.provider === "openai") {
+        return await (provider as OpenAIProvider).send( // Cast to specific provider
+          request.model,
+          request.messages,
+          request.temperature,
+          request.max_tokens,
+          PROVIDER_REQUEST_TIMEOUT_MS,
+          request.abortSignal
+        );
+      }
+      if (request.provider === "groq") { // Use if for type narrowing
+        return await (provider as GroqProvider).send( // Cast to specific provider
+          request.model,
+          request.messages,
+          request.temperature,
+          request.max_tokens,
+          PROVIDER_REQUEST_TIMEOUT_MS,
+          request.abortSignal
+        );
+      }
+      if (request.provider === "gemini") { // Use if for type narrowing
+        return await (provider as GeminiProvider).send( // Cast to specific provider
+          request.model,
+          request.messages,
+          request.temperature,
+          request.max_tokens,
+          PROVIDER_REQUEST_TIMEOUT_MS,
+          request.abortSignal
+        );
+      }
+      if (request.provider === "deepseek") { // Use if for type narrowing
+        return await (provider as DeepSeekProvider).send( // Cast to specific provider
+          request.model,
+          request.messages,
+          request.temperature,
+          request.max_tokens,
+          PROVIDER_REQUEST_TIMEOUT_MS,
+          request.abortSignal
+        );
+      }
+      if (request.provider === "openrouter") {
+        return await (provider as OpenRouterProvider).send(
+          request.model,
+          request.messages,
+          request.temperature,
+          request.max_tokens,
+          PROVIDER_REQUEST_TIMEOUT_MS,
+          request.abortSignal
+        );
+      }
+    } catch (error) {
+      if (isAbortError(error) && !request.abortSignal?.aborted) {
+        logger.warn("Provider timeout", {
+          stage: request.stage,
+          provider: request.provider,
+          model: request.model,
+          timeoutMs: PROVIDER_REQUEST_TIMEOUT_MS,
+        });
+      }
+      throw error;
     }
 
     throw new Error(`Unsupported provider: ${request.provider}`);
@@ -1179,7 +1212,11 @@ export class AIGatewayWithFallback implements AIGateway {
       return this.gateway.send(request);
     }
 
-    for (let attempt = 0; attempt < routes.length; attempt += 1) {
+    for (let attempt = 0; attempt < routes.length && attemptedRoutes.size < MAX_PROVIDER_ATTEMPTS; attempt += 1) {
+      if (request.abortSignal?.aborted) {
+        throw new Error(`Provider routing aborted for stage ${request.stage ?? "unknown"}`);
+      }
+
       const route = routes[attempt];
       const key = modelKey(route.provider, route.model);
       if (attemptedRoutes.has(key)) continue;
@@ -1209,7 +1246,8 @@ export class AIGatewayWithFallback implements AIGateway {
         };
         logger.info("Provider route attempt", {
           stage: request.stage,
-          attempt: attempt + 1,
+          attempt: attemptedRoutes.size,
+          maxAttempts: MAX_PROVIDER_ATTEMPTS,
           provider: route.provider,
           model: route.model,
           healthScore: getModelHealthScore(route.provider, route.model),
@@ -1223,19 +1261,22 @@ export class AIGatewayWithFallback implements AIGateway {
         lastError = err as Error;
         const failureType = markModelFailure(route.provider, route.model, err);
 
-        logger.warn("Provider route failed; trying next healthy route", {
+        logger.warn("Fallback switch", {
           stage: request.stage,
           provider: route.provider,
           model: route.model,
           failureType,
-          attempt: attempt + 1,
+          attempt: attemptedRoutes.size,
+          maxAttempts: MAX_PROVIDER_ATTEMPTS,
           error: err instanceof Error ? err.message : String(err),
         });
-        await sleep(backoffMs(attempt));
+        if (attemptedRoutes.size < MAX_PROVIDER_ATTEMPTS && !request.abortSignal?.aborted) {
+          await sleep(backoffMs(attempt), request.abortSignal);
+        }
       }
     }
 
-    throw lastError ?? new Error(`No available providers could fulfill the request (${unavailableReasons.join("; ")})`);
+    throw lastError ?? new Error(`No available providers could fulfill the request after ${attemptedRoutes.size} attempts (${unavailableReasons.join("; ")})`);
   }
 
   validateProvider(provider: AIProvider): boolean {
@@ -1265,7 +1306,7 @@ export class AIGatewayWithFallback implements AIGateway {
     for (const provider of providers) {
       if (!this.gateway.validateProvider(provider)) continue;
       if (provider === "openrouter") {
-        const models = await getHealthyOpenRouterModels();
+        const models = await getHealthyOpenRouterModels(request.abortSignal);
         const openRouterModels = request.provider === "openrouter"
           ? uniqueModels([request.model, ...models])
           : models;
@@ -1301,6 +1342,47 @@ function backoffMs(attempt: number): number {
   return base + Math.floor(Math.random() * 250);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error("Sleep aborted"));
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(resolve, ms);
+    const onAbort = (): void => {
+      clearTimeout(timeoutId);
+      reject(new Error("Sleep aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function createAbortSignal(
+  timeoutMs: number,
+  externalSignal?: AbortSignal
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  const onExternalAbort = (): void => {
+    controller.abort();
+  };
+
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else {
+    externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timeoutId);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
+    },
+  };
 }

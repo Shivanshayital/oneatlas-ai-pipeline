@@ -251,6 +251,7 @@ export interface AIRequest {
   temperature?: number;
   max_tokens?: number;
   stage?: PipelineStage; // Added for more granular fallback logic in gateway
+  abortSignal?: AbortSignal;
 }
 
 export interface AIResponse {

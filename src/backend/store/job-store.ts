@@ -127,6 +127,14 @@ export class JobStore {
     }
   }
 
+  setPartialJobResult(id: string, result: JobResult): void {
+    const state = this.jobs.get(id);
+    if (state) {
+      state.job.result = result;
+      state.job.updated_at = new Date().toISOString();
+    }
+  }
+
   setJobError(id: string, error: string): void {
     const state = this.jobs.get(id);
     if (state) {

@@ -32,6 +32,7 @@ export default function HomePage(): ReactElement {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const statusRef = useRef(status);
 
   useEffect(() => {
     fetch("/api/integrations")
@@ -45,6 +46,10 @@ export default function HomePage(): ReactElement {
       eventSourceRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   const fetchJobDetails = async (id: string): Promise<void> => {
     try {
@@ -114,13 +119,17 @@ export default function HomePage(): ReactElement {
       }
     });
 
-    source.addEventListener("stage_failed", (event) => {
+    source.addEventListener("stage_failed", async (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as StageEvent;
       setEvents((prev) => [...prev, payload]);
       setStatus("failed");
       setErrorMessage(payload.error ?? "Stage failed");
       setIsExecuting(false);
+      await fetchJobDetails(id);
       source.close();
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
     });
 
     source.addEventListener("generation_complete", async (event) => {
@@ -129,15 +138,21 @@ export default function HomePage(): ReactElement {
       setStatus("completed");
       setIsExecuting(false);
       source.close();
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
       await fetchJobDetails(id);
     });
 
     source.onerror = () => {
       source.close();
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
       setTimeout(() => {
-        if (eventSourceRef.current === source && status === "running") {
+        if (statusRef.current === "running") {
           subscribeToSse(id);
-        } else if (status !== "running") {
+        } else {
           setIsExecuting(false);
         }
       }, 1200);

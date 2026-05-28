@@ -91,6 +91,9 @@ const SPEC_PART_ENDPOINTS_PROMPT = `Gen API Endpoints. JSON ONLY. {"api_endpoint
 
 const SPEC_PART_FLOWS_PROMPT = `Gen Workflows. JSON ONLY. {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
 
+const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 5;
+const APP_SPEC_STAGE_TIMEOUT_MS = 90_000;
+
 // ============================================================================
 // Real Pipeline Execution with Full Observability
 // ============================================================================
@@ -191,7 +194,8 @@ export class PipelineExecutor {
     stage: PipelineStage,
     messages: AIMessage[],
     temperature: number,
-    max_tokens: number
+    max_tokens: number,
+    abortSignal?: AbortSignal
   ): Promise<AIResponse> { // Explicit return type
     const modelRoutingConfig = MODEL_ROUTING[stage as keyof typeof MODEL_ROUTING];
     type RoutingConfig = {
@@ -210,11 +214,23 @@ const routes = [
   typedRoutingConfig.tertiaryFallback,
 ].filter((r): r is string => typeof r === "string");
     let lastError: Error | null = null;
+    const attemptedRoutes = new Set<string>();
 
-    for (let attempt = 0; attempt < routes.length; attempt += 1) {
+    const maxAttempts = Math.min(routes.length, MAX_EXECUTOR_PROVIDER_ATTEMPTS);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (abortSignal?.aborted) {
+        throw new Error(`Stage ${stage} aborted after timeout`);
+      }
+
       const route = routes[attempt];
       // Use the new helper function to resolve provider and model
       const { provider, model } = resolveProviderAndModel(route);
+      const routeKey = `${provider}/${model}`;
+      if (attemptedRoutes.has(routeKey)) {
+        continue;
+      }
+      attemptedRoutes.add(routeKey);
 
       logger.info(`[Executor] Attempting stage ${stage} (attempt ${attempt + 1}) using ${provider}/${model}`);
 
@@ -226,6 +242,7 @@ const routes = [
           temperature,
           max_tokens,
           stage, // Pass stage to gateway for more granular fallback logic
+          abortSignal,
         });
 
         const effectiveAttempt = response.provider === provider ? attempt + 1 : attempt + 2;
@@ -259,7 +276,11 @@ const routes = [
         return response;
       } catch (error) {
         const errorMessage = String(error);
-        logger.warn(`[Executor] Stage ${stage} failed with ${provider}/${model}: ${errorMessage}. Trying fallback...`);
+        logger.warn(`[Executor] Stage ${stage} failed with ${provider}/${model}: ${errorMessage}. Trying fallback...`, {
+          jobId,
+          attempt: attempt + 1,
+          maxAttempts,
+        });
 
         jobStore.addRetryHistory(jobId, {
           stage,
@@ -278,6 +299,7 @@ const routes = [
             provider,
             model,
             attempt: attempt + 1,
+            max_attempts: maxAttempts,
             error: errorMessage,
           },
           error: errorMessage,
@@ -287,11 +309,14 @@ const routes = [
       }
     }
 
-    throw lastError ?? new Error("Unknown gateway failure");
+    throw lastError ?? new Error(`Unknown gateway failure after ${maxAttempts} attempts`);
   }
 
   async executePipeline(jobId: string, prompt: string): Promise<void> { // Explicit return type
     const totalStartTime = Date.now();
+    let intent: AppIntent | undefined;
+    let schema: DataSchema | undefined;
+    let spec: AppSpec | undefined;
     
     const state = jobStore.getJob(jobId);
     if (!state) {
@@ -305,17 +330,17 @@ const routes = [
 
       // Stage 1: Intent Extraction
       const intentStartTime = Date.now();
-      const intent = await this._executeIntentStage(jobId, prompt);
+      intent = await this._executeIntentStage(jobId, prompt);
       this.latencyMetrics.intent_stage_ms = Date.now() - intentStartTime;
 
       // Stage 2: Schema Generation
       const schemaStartTime = Date.now();
-      const schema = await this._executeSchemaStage(jobId, intent, prompt);
+      schema = await this._executeSchemaStage(jobId, intent, prompt);
       this.latencyMetrics.schema_stage_ms = Date.now() - schemaStartTime;
 
       // Stage 3: AppSpec Generation
       const specStartTime = Date.now();
-      const spec = await this._executeSpecStage(jobId, intent, schema, prompt);
+      spec = await this._executeSpecStage(jobId, intent, schema, prompt);
       this.latencyMetrics.spec_stage_ms = Date.now() - specStartTime;
 
       this.latencyMetrics.total_ms = Date.now() - totalStartTime;
@@ -644,14 +669,27 @@ if (
       timestamp: new Date().toISOString(),
     });
     const stageStartTime = Date.now();
+    const controller = new AbortController();
+    let didTimeout = false;
+    let sectionMeta: Record<string, unknown> = {};
+    let sectionEndpoints: Record<string, unknown> = {};
+    let sectionFlows: Record<string, unknown> = {};
+    const timeoutId = setTimeout(() => {
+      didTimeout = true;
+      logger.warn("AppSpec timeout", {
+        jobId,
+        timeoutMs: APP_SPEC_STAGE_TIMEOUT_MS,
+      });
+      controller.abort();
+    }, APP_SPEC_STAGE_TIMEOUT_MS);
 
     try {
       const schemaJson = JSON.stringify(schema, null, 2);
       
       // PARTIAL CHUNKING: Metadata, Endpoints, and Flows generated separately to save tokens
-      const sectionMeta = await this._executeSpecSection(jobId, "meta", SPEC_PART_META_PROMPT, prompt, schemaJson);
-      const sectionEndpoints = await this._executeSpecSection(jobId, "endpoints", SPEC_PART_ENDPOINTS_PROMPT, prompt, schemaJson);
-      const sectionFlows = await this._executeSpecSection(jobId, "flows", SPEC_PART_FLOWS_PROMPT, prompt, schemaJson);
+      sectionMeta = await this._executeSpecSection(jobId, "meta", SPEC_PART_META_PROMPT, prompt, schemaJson, controller.signal);
+      sectionEndpoints = await this._executeSpecSection(jobId, "endpoints", SPEC_PART_ENDPOINTS_PROMPT, prompt, schemaJson, controller.signal);
+      sectionFlows = await this._executeSpecSection(jobId, "flows", SPEC_PART_FLOWS_PROMPT, prompt, schemaJson, controller.signal);
 
       const specData: Record<string, unknown> = {
         ...sectionMeta,
@@ -742,16 +780,53 @@ if (
         },
       });
 
+      logger.info("Stage completion", {
+        jobId,
+        stage: "spec",
+        latencyMs: Date.now() - stageStartTime,
+      });
+
       return spec;
     } catch (error) {
-      const errorMsg = String(error);
+      const timedOut = didTimeout || controller.signal.aborted;
+      const errorMsg = timedOut
+        ? `AppSpec stage exceeded ${APP_SPEC_STAGE_TIMEOUT_MS}ms`
+        : String(error);
+
+      if (timedOut) {
+        const partialSpec = this._buildPartialSpec(intent, schema, {
+          ...sectionMeta,
+          ...sectionEndpoints,
+          ...sectionFlows,
+        });
+        jobStore.setStageOutput(jobId, "spec", partialSpec);
+        jobStore.setPartialJobResult(jobId, {
+          intent,
+          schema,
+          spec: partialSpec,
+          repairs_applied: jobStore.getRepairs(jobId),
+        });
+      }
+
+      jobStore.setJobError(jobId, errorMsg);
       jobStore.addEvent(jobId, {
         type: "stage_failed",
         stage: "spec",
         timestamp: new Date().toISOString(),
         error: errorMsg,
+        data: {
+          timed_out: timedOut,
+          partial_spec_available: timedOut,
+        },
+      });
+      logger.error("Stage failure", error instanceof Error ? error : new Error(errorMsg), {
+        jobId,
+        stage: "spec",
+        timedOut,
       });
       throw error;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -760,9 +835,14 @@ if (
     sectionName: string, 
     systemPrompt: string, 
     prompt: string, 
-    schemaJson: string
+    schemaJson: string,
+    abortSignal: AbortSignal
   ): Promise<Record<string, unknown>> { // Changed from any
     try {
+      if (abortSignal.aborted) {
+        throw new Error(`Spec section ${sectionName} aborted`);
+      }
+
       const response = await this._sendWithRetry(
         jobId,
         "spec",
@@ -771,7 +851,8 @@ if (
           { role: "user", content: `Prompt:${prompt}\nSchema:${schemaJson}` },
         ],
         0.2,
-        800
+        800,
+        abortSignal
       );
 
       const extract = extractJSON<Record<string, unknown>>(response.content);
@@ -788,6 +869,10 @@ if (
 
       return extract.data;
     } catch (error) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       logger.warn("Spec section generation degraded", {
         jobId,
@@ -816,6 +901,31 @@ if (
       });
       return {};
     }
+  }
+
+  private _buildPartialSpec(
+    intent: AppIntent,
+    schema: DataSchema,
+    sections: Record<string, unknown>
+  ): AppSpec {
+    const partialSpec: Record<string, unknown> = {
+      ...sections,
+      data_schema: schema,
+    };
+
+    this._ensureMinimumSpec(partialSpec, intent, schema);
+    this._coerceSpecCollections(partialSpec, intent, schema);
+
+    const { data: repairedSpec } = repairEngine.repairConsistency(
+      "spec",
+      partialSpec,
+      schema
+    );
+
+    this._ensureMinimumSpec(repairedSpec, intent, schema);
+    this._coerceSpecCollections(repairedSpec, intent, schema);
+
+    return AppSpecSchema.parse(repairedSpec) as AppSpec;
   }
 
   private _ensureMinimumSpec( // Explicit return type
