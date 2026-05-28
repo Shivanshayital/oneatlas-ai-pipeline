@@ -17,6 +17,10 @@ const TOKEN_PRICING_PER_MILLION_INPUT_USD: Record<string, number> = {
   "gemini/gemini-2.0-flash-exp": 0.35, // Estimate
   "deepseek/deepseek-chat": 0.10, // Estimate, DeepSeek pricing is per 1M tokens
   "deepseek/deepseek-coder": 0.10, // Estimate
+  "openrouter/google/gemini-2.5-flash": 0.35,
+  "openrouter/deepseek/deepseek-chat": 0.15,
+  "openrouter/meta-llama/llama-3.3-70b-instruct": 0.60,
+  "openrouter/openai/gpt-4o-mini": 0.15,
 };
 
 const TOKEN_PRICING_PER_MILLION_OUTPUT_USD: Record<string, number> = {
@@ -32,6 +36,10 @@ const TOKEN_PRICING_PER_MILLION_OUTPUT_USD: Record<string, number> = {
   "gemini/gemini-2.0-flash-exp": 0.70, // Estimate
   "deepseek/deepseek-chat": 0.10, // Estimate
   "deepseek/deepseek-coder": 0.10, // Estimate
+  "openrouter/google/gemini-2.5-flash": 0.70,
+  "openrouter/deepseek/deepseek-chat": 0.60,
+  "openrouter/meta-llama/llama-3.3-70b-instruct": 0.60,
+  "openrouter/openai/gpt-4o-mini": 0.60,
 };
 
 // ============================================================================
@@ -45,6 +53,7 @@ const FREE_TIER_QUOTA_ESTIMATES: Partial<Record<AIProvider, { totalTokens: numbe
   groq: { totalTokens: 5_000_000, resetInterval: "monthly" }, // Generous estimate
   gemini: { totalTokens: 1_000_000, resetInterval: "monthly" }, // Example for Gemini Flash
   deepseek: { totalTokens: 1_000_000, resetInterval: "monthly" }, // Example
+  openrouter: { totalTokens: 1_000_000, resetInterval: "monthly" },
 };
 
 export class CostTracker {

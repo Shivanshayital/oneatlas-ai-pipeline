@@ -5,20 +5,23 @@ import { AIProvider, AIRequest, AIResponse } from "../types";
 // ============================================================================
 
 export const MODEL_ROUTING = {
-  intent: { // Prioritize Gemini Flash, then DeepSeek, then Groq
-    primary: "gemini/gemini-1.5-flash",
-    fallback: "deepseek/deepseek-chat",
-    secondaryFallback: "groq/llama-3.3-70b-versatile",
+  intent: {
+    primary: "openrouter/google/gemini-2.5-flash",
+    fallback: "openrouter/deepseek/deepseek-chat",
+    secondaryFallback: "openrouter/meta-llama/llama-3.3-70b-instruct",
+    tertiaryFallback: "openrouter/openai/gpt-4o-mini",
   },
-  schema: { // Prioritize Gemini Flash, then DeepSeek, then Groq
-    primary: "gemini/gemini-1.5-flash",
-    fallback: "deepseek/deepseek-chat",
-    secondaryFallback: "groq/llama-3.3-70b-versatile",
+  schema: {
+    primary: "openrouter/google/gemini-2.5-flash",
+    fallback: "openrouter/deepseek/deepseek-chat",
+    secondaryFallback: "openrouter/meta-llama/llama-3.3-70b-instruct",
+    tertiaryFallback: "openrouter/openai/gpt-4o-mini",
   },
-  spec: { // Prioritize Gemini Flash, then DeepSeek, then Groq
-    primary: "gemini/gemini-1.5-flash",
-    fallback: "deepseek/deepseek-chat",
-    secondaryFallback: "groq/llama-3.3-70b-versatile",
+  spec: {
+    primary: "openrouter/google/gemini-2.5-flash",
+    fallback: "openrouter/deepseek/deepseek-chat",
+    secondaryFallback: "openrouter/meta-llama/llama-3.3-70b-instruct",
+    tertiaryFallback: "openrouter/openai/gpt-4o-mini",
   },
 } as const;
 
@@ -54,7 +57,7 @@ interface ProviderRegistry {
 
 export interface DetailedProviderError {
   message: string;
-  type: 'rate_limit' | 'quota' | 'timeout' | 'context_length' | 'auth' | 'unknown';
+  type: 'rate_limit' | 'quota' | 'timeout' | 'context_length' | 'auth' | 'balance' | 'unknown';
   status: number;
 }
 
@@ -74,6 +77,7 @@ async function readProviderError(response: Response): Promise<DetailedProviderEr
   const normalized = message.toLowerCase();
   if (response.status === 429) type = 'rate_limit';
   else if (normalized.includes("quota") || normalized.includes("billing") || response.status === 402) type = 'quota';
+  else if (normalized.includes("insufficient balance") || normalized.includes("credit")) type = 'balance';
   else if (response.status === 401 || response.status === 403) type = 'auth';
   else if (normalized.includes("context_length") || normalized.includes("too many tokens") || response.status === 413) type = 'context_length';
   else if (normalized.includes("timeout") || normalized.includes("abort")) type = 'timeout';
@@ -163,7 +167,7 @@ class ProviderHealthCache {
 
   private _cooldownForError(message: string): number {
     const normalized = message.toLowerCase();
-    if (normalized.includes("quota") || normalized.includes("billing")) {
+    if (normalized.includes("quota") || normalized.includes("billing") || normalized.includes("balance")) {
       return PROVIDER_HEALTH_COOLDOWNS_MS.quota;
     }
     if (normalized.includes("rate limit") || normalized.includes("429")) {
@@ -205,6 +209,7 @@ interface OpenAIRequest {
 }
 
 interface OpenAIResponse {
+  model?: string;
   choices: Array<{
     message: {
       content: string;
@@ -481,6 +486,76 @@ class GeminiProvider {
 }
 
 // ============================================================================
+// OpenRouter Provider
+// ============================================================================
+
+class OpenRouterProvider {
+  private apiKey: string;
+  private baseUrl: string = "https://openrouter.ai/api/v1";
+
+  constructor(apiKey: string) {
+    if (!apiKey) throw new Error("OpenRouter API key not provided");
+    this.apiKey = apiKey;
+  }
+
+  async send(
+    model: string,
+    messages: Array<{ role: string; content: string }>,
+    temperature: number | undefined,
+    max_tokens?: number,
+    timeout: number = 40000
+  ): Promise<AIResponse> {
+    const startTime = Date.now();
+
+    const body = {
+      model,
+      messages,
+      temperature: temperature ?? 0.7,
+      max_tokens: max_tokens ?? 1024,
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://oneatlas.ai", // OpenRouter requirement
+          "X-Title": "OneAtlas AI Pipeline",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const err = await readProviderError(response);
+        throw new Error(`OpenRouter [${err.type}]: ${err.message}`);
+      }
+
+      const data = (await response.json()) as OpenAIResponse; // OpenRouter is OpenAI-compatible
+      const content = requireContent(data.choices?.[0]?.message?.content, "openrouter");
+
+      return {
+        content,
+        model: data.model || model,
+        provider: "openrouter",
+        usage: {
+          input_tokens: data.usage.prompt_tokens,
+          output_tokens: data.usage.completion_tokens,
+          total_tokens: data.usage.total_tokens,
+        },
+        latency_ms: Date.now() - startTime,
+      };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+// ============================================================================
 // DeepSeek Provider
 // ============================================================================
 
@@ -571,7 +646,7 @@ class DeepSeekProvider {
 // ============================================================================
 
 export class MultiProviderGateway implements AIGateway {
-  private providers: Map<AIProvider, OpenAIProvider | GroqProvider | GeminiProvider | DeepSeekProvider>;
+  private providers: Map<AIProvider, OpenAIProvider | GroqProvider | GeminiProvider | DeepSeekProvider | OpenRouterProvider>;
 
   constructor(config: ProviderRegistry) {
     this.providers = new Map();
@@ -587,6 +662,9 @@ export class MultiProviderGateway implements AIGateway {
     }
     if (config.deepseek) {
       this.providers.set("deepseek", new DeepSeekProvider(config.deepseek.apiKey));
+    }
+    if (config.openrouter) {
+      this.providers.set("openrouter", new OpenRouterProvider(config.openrouter.apiKey));
     }
   }
 
@@ -635,15 +713,20 @@ export class MultiProviderGateway implements AIGateway {
         10000
       );
     }
+    if (request.provider === "openrouter") {
+      return (provider as OpenRouterProvider).send(
+        request.model,
+        request.messages,
+        request.temperature,
+        request.max_tokens,
+        40000
+      );
+    }
 
     throw new Error(`Unsupported provider: ${request.provider}`);
   }
 
   validateProvider(provider: AIProvider): boolean {
-    if (provider === "anthropic" || provider === "mistral" || provider === "openrouter") {
-      // Stub providers - return false until implemented
-      return false; // These are stubs, so they are not validated as available
-    }
     return this.providers.has(provider);
   }
 
@@ -659,6 +742,14 @@ export class MultiProviderGateway implements AIGateway {
     // DeepSeek is now a real provider, so it should be handled here
     if (provider === "deepseek") {
       return ["deepseek-chat", "deepseek-coder"];
+    }
+    if (provider === "openrouter") {
+      return [
+        "google/gemini-2.5-flash",
+        "deepseek/deepseek-chat",
+        "meta-llama/llama-3.3-70b-instruct",
+        "openai/gpt-4o-mini"
+      ];
     }
     return [];
   }
@@ -834,8 +925,8 @@ export class AIGatewayWithFallback implements AIGateway {
       this._logProviderSkipOnce(request.provider);
     }
 
-    // Fallback selection order: prefer Gemini, then DeepSeek, then Groq, then OpenAI
-    const fallbackOrder: AIProvider[] = ["gemini", "deepseek", "groq", "openai"]; // Required Priority
+    // Fallback selection order: OpenRouter is unified, then individual providers
+    const fallbackOrder: AIProvider[] = ["openrouter", "gemini", "deepseek", "groq", "openai"];
 
     // Default model mapping per provider (safe fallbacks)
     const DEFAULT_MODEL: Record<AIProvider, string> = {
@@ -845,7 +936,7 @@ export class AIGatewayWithFallback implements AIGateway {
       openai: "gpt-4o-mini", // OpenAI's cost-effective model
       anthropic: "",
       mistral: "",
-      openrouter: "",
+      openrouter: "google/gemini-2.5-flash",
     };
 
     let lastError: Error | null = null;

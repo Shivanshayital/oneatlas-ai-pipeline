@@ -202,6 +202,7 @@ export class PipelineExecutor {
       cost_usd: cost,
       attempt,
       timestamp: new Date().toISOString(),
+      health_status: "healthy", // Injected for dashboard observability
     };
 
     jobStore.addProviderUsage(jobId, providerUsage);
@@ -238,6 +239,7 @@ export class PipelineExecutor {
       modelRoutingConfig.primary,
       modelRoutingConfig.fallback,
       modelRoutingConfig.secondaryFallback, // Add secondary fallback
+      modelRoutingConfig.tertiaryFallback,
     ].filter(Boolean) as string[]; // Filter out undefined/null
 
     let lastError: Error | null = null;
@@ -420,7 +422,7 @@ export class PipelineExecutor {
           { role: "user", content: prompt },
         ],
         0.3, // Lower temperature for more deterministic intent extraction
-        1024
+        512 // Optimized for free-tier/speed
       );
 
       // Extract JSON with repairs
@@ -534,7 +536,7 @@ export class PipelineExecutor {
           },
         ],
         0.4, // Slightly higher temperature for creativity in schema generation
-        2048
+        1024 // Optimized for free-tier
       );
 
       const extractResult = extractJSON(response.content);
@@ -661,7 +663,7 @@ export class PipelineExecutor {
           },
         ],
         0.4, // Moderate temperature for balanced creativity and adherence to schema
-        4096
+        1024 // Keep prompts compact for free-tier testing
       );
 
       const extractResult = extractJSON(response.content);
