@@ -40,9 +40,49 @@ const INTENT_EXTRACTION_PROMPT = `Extract app intent. ${COMPACT_MODE}
 Structure: {"appName":"string","appType":"crm|project_management|ecommerce|hr_tool|inventory|analytics|custom","features":["strings"],"entities":["strings"],"integrations_requested":["slack|gmail|whatsapp|stripe|webhook"],"assumptions":["strings"]}`;
 
 const SCHEMA_GENERATION_PROMPT = `Generate data schema. ${COMPACT_MODE}
-Required: "id" and "tenantId" (uuid) per entity.
-Structure: {"schema_version":"1.0.0","entities":[{"name":"String","tableName":"string","fields":[{"name":"string","type":"string","required":true}],"relations":[]}]}`;
 
+Required:
+- Every entity MUST include:
+  - id (uuid)
+  - tenantId (uuid)
+
+Allowed field types ONLY:
+- string
+- number
+- boolean
+- date
+- timestamp
+- uuid
+- json
+- enum
+
+NEVER use:
+- datetime
+- integer
+- float
+- object
+- array
+
+Return STRICT valid JSON only.
+
+Structure:
+{
+  "schema_version":"1.0.0",
+  "entities":[
+    {
+      "name":"String",
+      "tableName":"string",
+      "fields":[
+        {
+          "name":"string",
+          "type":"string",
+          "required":true
+        }
+      ],
+      "relations":[]
+    }
+  ]
+}`;
 const SPEC_PART_META_PROMPT = `Generate Spec Metadata and Pages. ${COMPACT_MODE}
 Structure: {"metadata":{"app_name":"string","app_type":"string"},"pages":[{"name":"string","path":"/string","title":"string","requires_auth":true,"components":["string"]}],"auth_rules":[]}`;
 
@@ -464,6 +504,47 @@ export class PipelineExecutor {
       }
 
       const schemaData = extractResult.data as Record<string, unknown>;
+
+// ============================================================================
+// FIELD TYPE NORMALIZATION
+// ============================================================================
+
+const TYPE_NORMALIZATION: Record<
+  string,
+  "string" | "number" | "boolean" | "timestamp" | "json" | "date" | "uuid" | "enum"
+> = {
+  datetime: "timestamp",
+  integer: "number",
+  float: "number",
+  object: "json",
+  array: "json",
+};
+
+// Normalize invalid field types returned by LLMs
+if (
+  schemaData.entities &&
+  Array.isArray(schemaData.entities)
+) {
+  for (const entity of schemaData.entities as DataEntity[]) {
+    if (!Array.isArray(entity.fields)) continue;
+
+    for (const field of entity.fields) {
+      const rawType = String(field.type).toLowerCase();
+
+      field.type =
+  TYPE_NORMALIZATION[rawType] ??
+  (rawType as
+    | "string"
+    | "number"
+    | "boolean"
+    | "timestamp"
+    | "json"
+    | "date"
+    | "uuid"
+    | "enum");
+    }
+  }
+}
 
       // Ensure every entity has tenantId
       if (schemaData.entities && Array.isArray(schemaData.entities)) { // Type guard
