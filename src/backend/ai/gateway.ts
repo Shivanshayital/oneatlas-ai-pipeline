@@ -7,22 +7,24 @@ import { logger } from "../logging/logger";
 
 export const MODEL_ROUTING = {
   intent: {
-    primary: "openrouter/openai/gpt-oss-20b:free",
-    fallback: "openrouter/google/gemini-2.0-flash-exp:free",
-    secondaryFallback: "groq/llama-3.3-70b-versatile",
-    tertiaryFallback: "deepseek/deepseek-chat",
+    primary: "openai/gpt-oss-20b:free",
+    fallback: "moonshotai/kimi-k2:free",
+    secondaryFallback: "google/gemini-2.0-flash-exp:free",
+    tertiaryFallback: "meta-llama/llama-3.1-8b-instruct:free",
   },
+
   schema: {
-    primary: "openrouter/openai/gpt-oss-20b:free",
-    fallback: "openrouter/google/gemini-2.0-flash-exp:free",
-    secondaryFallback: "groq/llama-3.3-70b-versatile",
-    tertiaryFallback: "deepseek/deepseek-chat",
+    primary: "openai/gpt-oss-20b:free",
+    fallback: "moonshotai/kimi-k2:free",
+    secondaryFallback: "google/gemini-2.0-flash-exp:free",
+    tertiaryFallback: "meta-llama/llama-3.1-8b-instruct:free",
   },
+
   spec: {
-    primary: "openrouter/openai/gpt-oss-20b:free",
-    fallback: "openrouter/google/gemini-2.0-flash-exp:free",
-    secondaryFallback: "groq/llama-3.3-70b-versatile",
-    tertiaryFallback: "deepseek/deepseek-chat",
+    primary: "openai/gpt-oss-20b:free",
+    fallback: "moonshotai/kimi-k2:free",
+    secondaryFallback: "google/gemini-2.0-flash-exp:free",
+    tertiaryFallback: "meta-llama/llama-3.1-8b-instruct:free",
   },
 } as const;
 
