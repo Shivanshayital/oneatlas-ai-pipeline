@@ -10,7 +10,6 @@ import {
   AIProvider,
   AIResponse,
   PipelineMetrics, // Keep PipelineMetrics
-  DataField, // Import DataField for fallback entity generation
   PipelineStage,
 } from "../types/index";
 import { AIGateway, MODEL_ROUTING, getModelHealthScore, resolveProviderAndModel } from "../ai/gateway";
@@ -87,20 +86,23 @@ Structure:
   ]
 }`;
 
-// Shorter, more direct prompts to reduce token usage and processing time
-const SPEC_PART_META_PROMPT = `Generate AppSpec metadata and pages. JSON: {"metadata":{"app_name":"str","app_type":"str"},"pages":[{"name":"str","path":"/str","title":"str","requires_auth":bool,"components":["str"]}],"auth_rules":[]}`;
+/**
+ * COMMENT: Consolidated the fragmented prompts into a single compact APPSPEC_PROMPT.
+ * Section-based generation was removed to eliminate redundant overhead and latency from multiple sequential LLM calls.
+ * Compact prompts reduce token usage by avoiding repeated schema injections and metadata headers.
+ * Compact generation improves free-model reliability by providing full architectural context in a single pass.
+ */
+const APPSPEC_PROMPT = `
+Generate compact AppSpec JSON.
+Include:
+* pages
+* endpoints
+* workflows
+* auth
+Return valid JSON only.`;
 
-const SPEC_PART_ENDPOINTS_PROMPT = `Generate API endpoints for schema. JSON: {"api_endpoints":[{"path":"/api/str","method":"GET|POST|PUT|DELETE","entity":"str","auth_required":bool,"response_type":"json"}]}`;
-
-const SPEC_PART_FLOWS_PROMPT = `Generate workflows for schema. JSON: {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
-
-const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 3; // 1 initial + 2 retries max
-// COMMENT: Free models on OpenRouter can have unpredictable latency due to queuing.
-// 30s is a safer window for structured JSON generation involving multiple sequential LLM calls.
-// Partial recovery ensures the pipeline doesn't hard-fail if only one section (e.g., flows) hangs.
-const APP_SPEC_STAGE_TIMEOUT_MS = 30_000; 
-
-const PROMPT_TRIM_THRESHOLD = 3000; // Max characters for prompt context
+const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 3; // Initial attempt + 2 retries
+const APP_SPEC_STAGE_TIMEOUT_MS = 30_000; // Hard timeout for AppSpec stage (30 seconds)
 
 // ============================================================================
 // Real Pipeline Execution with Full Observability
@@ -121,26 +123,6 @@ export class PipelineExecutor {
     this.costTracker = new CostTracker();
   }
 
-  /**
-   * Token guardrail: Trims prompt context if it exceeds safety limits
-   */
-  private _trimPromptContext(text: string): string {
-    if (text.length <= PROMPT_TRIM_THRESHOLD) return text;
-    logger.warn(`[Executor] Prompt exceeds threshold (${text.length} chars). Trimming context.`);
-    return text.substring(0, PROMPT_TRIM_THRESHOLD) + "... [truncated]";
-  }
-
-  /**
-   * Helper to slugify a string and pluralize it for use as a table name.
-   * @param name The singular entity name.
-   * @returns A slugified and pluralized string.
-   */
-  private _slugifyAndPluralize(name: string): string {
-    // Convert to lowercase and replace spaces with underscores
-    const slug = name.toLowerCase().replace(/\s+/g, '_');
-    // Simple pluralization: add 's' if not already ending in 's'
-    return slug.endsWith('s') ? slug : slug + 's';
-  }
   private async _updateMetrics(jobId: string): Promise<void> {
     const totals = this.costTracker.getTotals();
     const state = await jobStore.getJob(jobId);
@@ -317,13 +299,11 @@ const routes = [
           error: errorMessage,
           timestamp: new Date().toISOString(),
         });
-
+        // Emit event for each retry attempt
         await jobStore.addEvent(jobId, {
           type: "stage_retry",
           stage,
           timestamp: new Date().toISOString(),
-          provider,
-          model,
           data: {
             provider,
             model,
@@ -335,9 +315,6 @@ const routes = [
         });
 
         lastError = error as Error;
-        
-        // Retry cooldown: small backoff to avoid hammering same failing endpoint
-        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
       }
     }
 
@@ -528,75 +505,6 @@ const routes = [
     }
   }
 
-  /**
-   * Generates a minimal fallback DataEntity based on the app intent.
-   * This is used when the AI model fails to produce a valid or non-empty schema.
-   * @param intent The extracted AppIntent.
-   * @returns A DataEntity object.
-   */
-  // COMMENT: Free models, especially smaller ones, can sometimes struggle with complex JSON structures
-  // and might return empty arrays or incomplete objects, leading to validation failures.
-  // This fallback mechanism ensures that the pipeline can recover from such cases by
-  // deterministically generating a minimal, valid schema based on the extracted intent.
-  // This improves the overall reliability and stability of the generation process,
-  // preventing hard failures and allowing the pipeline to continue with a usable (though basic) output.
-  // This "repair-first" architecture is crucial in LLM systems to handle model imperfections gracefully.
-  private _generateFallbackEntity(intent: AppIntent): DataEntity {
-    let entityName = "Item";
-    const additionalFields: DataField[] = [];
-
-    const promptContext = `${intent.appName.toLowerCase()} ${intent.features.join(" ").toLowerCase()} ${intent.entities.join(" ").toLowerCase()}`;
-
-    // Prioritize direct keyword matches from prompt context or appType
-    if (promptContext.includes("todo") || promptContext.includes("task") || intent.appType === "project_management") {
-      entityName = "Task";
-      additionalFields.push({ name: "title", type: "string", required: true });
-      additionalFields.push({ name: "status", type: "enum", enum_values: ["todo", "in_progress", "done"], required: true });
-    } else if (promptContext.includes("ecommerce") || promptContext.includes("product") || promptContext.includes("order") || promptContext.includes("shop") || intent.appType === "ecommerce") {
-      entityName = "Product";
-      additionalFields.push({ name: "name", type: "string", required: true });
-      additionalFields.push({ name: "price", type: "number", required: true });
-    } else if (promptContext.includes("chat") || promptContext.includes("message")) {
-      entityName = "Message";
-      additionalFields.push({ name: "content", type: "string", required: true });
-      additionalFields.push({ name: "senderId", type: "uuid", required: true });
-    } else if (promptContext.includes("crm") || promptContext.includes("customer") || intent.appType === "crm") {
-      entityName = "Customer";
-      additionalFields.push({ name: "name", type: "string", required: true });
-      additionalFields.push({ name: "email", type: "string", required: false });
-    } else if (promptContext.includes("blog") || promptContext.includes("post")) {
-      entityName = "Post";
-      additionalFields.push({ name: "title", type: "string", required: true });
-      additionalFields.push({ name: "content", type: "string", required: true });
-    } else {
-      // Default to generic "Item" if nothing else matches
-      entityName = "Item";
-      additionalFields.push({ name: "name", type: "string", required: true });
-    }
-
-    // Ensure basic required fields are always present
-    const baseFields: DataField[] = [
-      { name: "id", type: "uuid", required: true },
-      { name: "tenantId", type: "uuid", required: true },
-      { name: "createdAt", type: "timestamp", required: true },
-      { name: "updatedAt", type: "timestamp", required: true },
-    ];
-
-    // Combine base fields with additional fields, avoiding duplicates by name
-    const fieldsMap = new Map<string, DataField>();
-    [...baseFields, ...additionalFields].forEach(field => {
-      fieldsMap.set(field.name, field);
-    });
-
-    return {
-      name: entityName,
-      tableName: this._slugifyAndPluralize(entityName),
-      fields: Array.from(fieldsMap.values()),
-      relations: [],
-      description: `Fallback entity generated due to empty schema from AI for a ${intent.appType} app.`,
-    };
-  }
-
   private async _executeSchemaStage( // Explicit return type
     jobId: string,
     intent: AppIntent,
@@ -639,35 +547,10 @@ const routes = [
 
       const extractResult = extractJSON(response.content);
       if (!extractResult.success || extractResult.data === null) {
-        // COMMENT: If the model fails to return valid JSON, it's a structural issue.
-        // The extractJSON utility attempts to repair common JSON malformations.
         throw new Error(`Failed to extract schema JSON: ${extractResult.error}`);
       }
 
       const schemaData = extractResult.data as Record<string, unknown>;
-
-      // COMMENT: Free models, especially smaller ones, can sometimes struggle with complex JSON structures
-      // and might return empty arrays or incomplete objects, leading to validation failures.
-      // This fallback mechanism ensures that the pipeline can recover from such cases by
-      // deterministically generating a minimal, valid schema based on the extracted intent.
-      // This improves the overall reliability and stability of the generation process,
-      // preventing hard failures and allowing the pipeline to continue with a usable (though basic) output.
-      // This "repair-first" architecture is crucial in LLM systems to handle model imperfections gracefully.
-      if (!schemaData.entities || (Array.isArray(schemaData.entities) && schemaData.entities.length === 0)) {
-        logger.warn(`[Executor] Schema generation returned empty entities. Applying fallback entity generation.`, { jobId });
-        const fallbackEntity = this._generateFallbackEntity(intent);
-        schemaData.entities = [fallbackEntity];
-
-        await jobStore.addRepair(jobId, {
-          timestamp: new Date().toISOString(),
-          stage: "schema",
-          strategy: "field_repair",
-          error: "Schema entities array was empty or missing.",
-          action: `Generated fallback entity '${fallbackEntity.name}' based on app intent.`,
-          outcome: "partial",
-          details: { generated_entity: fallbackEntity.name },
-        });
-      }
 
 // ============================================================================
 // FIELD TYPE NORMALIZATION
@@ -798,9 +681,6 @@ if (
     const stageStartTime = Date.now();
     const controller = new AbortController();
     let didTimeout = false;
-    let sectionMeta: Record<string, unknown> = {};
-    let sectionEndpoints: Record<string, unknown> = {};
-    let sectionFlows: Record<string, unknown> = {};
     const timeoutId = setTimeout(() => {
       didTimeout = true;
       logger.warn("AppSpec timeout", {
@@ -811,19 +691,31 @@ if (
     }, APP_SPEC_STAGE_TIMEOUT_MS);
 
     try {
-      const schemaJson = JSON.stringify(schema, null, 2);
-      
-      // PARTIAL CHUNKING: Metadata, Endpoints, and Flows generated separately to save tokens
-      sectionMeta = await this._executeSpecSection(jobId, "meta", SPEC_PART_META_PROMPT, prompt, schemaJson, controller.signal);
-      sectionEndpoints = await this._executeSpecSection(jobId, "endpoints", SPEC_PART_ENDPOINTS_PROMPT, prompt, schemaJson, controller.signal); // Max tokens 500
-      sectionFlows = await this._executeSpecSection(jobId, "flows", SPEC_PART_FLOWS_PROMPT, prompt, schemaJson, controller.signal); // Max tokens 500
-      
-      const specData: Record<string, unknown> = {
-        ...sectionMeta,
-        ...sectionEndpoints,
-        ...sectionFlows,
-        data_schema: schema
-      };
+  const schemaJson = JSON.stringify(schema, null, 2);
+
+      // COMMENT: 'generateStructuredOutput' was an invalid method as it's not defined in the AIGateway interface.
+      // We use the existing '_sendWithRetry' helper to correctly route the request through the gateway API.
+      // This preserves routing, fallback logic, and usage tracking.
+      // Structured JSON parsing is safely handled by 'extractJSON', which extracts and repairs JSON from LLM content.
+      const response = await this._sendWithRetry(
+        jobId,
+        "spec",
+        [
+          { role: "system", content: APPSPEC_PROMPT },
+          { role: "user", content: `Schema Context:\n${schemaJson}\n\nUser Request: ${prompt}` },
+        ],
+        0.2,
+        350, // max_tokens: 350
+        controller.signal
+      );
+
+      const extractResult = extractJSON<Record<string, unknown>>(response.content);
+      if (!extractResult.success || !extractResult.data) {
+        throw new Error(`Failed to extract AppSpec JSON: ${extractResult.error}`);
+      }
+
+      const specData = extractResult.data;
+      specData.data_schema = schema;
 
       // Ensure metadata
       if (!specData.metadata) {
@@ -835,23 +727,20 @@ if (
         };
       }
 
-      // Ensure schema is included
-      specData.data_schema = schema;
-
       const { data: fieldRepairedSpec, logs: fieldRepairLogs } = repairEngine.repairFields(
         "spec",
         specData,
         ["metadata", "data_schema", "pages", "api_endpoints", "auth_rules"]
       );
 
-      for (const log of fieldRepairLogs) {
+      for (const log of fieldRepairLogs) { // Log field repairs
         await jobStore.addRepair(jobId, log);
       }
 
       this._ensureMinimumSpec(fieldRepairedSpec, intent, schema);
       this._coerceSpecCollections(fieldRepairedSpec, intent, schema);
 
-      // Consistency repair (Max 1 pass as requested)
+      // Repair consistency
       const { data: repairedSpec, logs: repairLogs } = repairEngine.repairConsistency(
         "spec",
         fieldRepairedSpec,
@@ -917,47 +806,20 @@ if (
 
       return spec;
     } catch (error) {
-      const elapsed = Date.now() - stageStartTime;
       const timedOut = didTimeout || controller.signal.aborted;
-      
-      // Classify timeout for better observability
-      let timeoutType: 'generation' | 'provider' | 'network' = 'generation';
-      const errorStr = String(error).toLowerCase();
-      if (errorStr.includes('fetch') || errorStr.includes('network')) {
-        timeoutType = 'network';
-      } else if (errorStr.includes('gateway') || errorStr.includes('provider')) {
-        timeoutType = 'provider';
-      }
-
       const errorMsg = timedOut
-        ? `AppSpec stage exceeded ${APP_SPEC_STAGE_TIMEOUT_MS}ms (${timeoutType} timeout)`
+        ? `AppSpec stage exceeded ${APP_SPEC_STAGE_TIMEOUT_MS}ms`
         : String(error);
-
-      logger.warn(`[Executor] Spec stage failure. Elapsed: ${elapsed}ms. Type: ${timeoutType}`, { jobId, timedOut });
 
       if (timedOut) {
         // If timeout, build and save a partial spec
-        const partialSpec = this._buildPartialSpec(intent, schema, {
-          ...sectionMeta,
-          ...sectionEndpoints,
-          ...sectionFlows,
-        });
+        const partialSpec = this._buildPartialSpec(intent, schema, {});
         await jobStore.setStageOutput(jobId, "spec", partialSpec);
         await jobStore.setPartialJobResult(jobId, {
           intent,
           schema,
           spec: partialSpec,
           repairs_applied: await jobStore.getRepairs(jobId),
-        });
-
-        await jobStore.addRepair(jobId, {
-          timestamp: new Date().toISOString(),
-          stage: "spec",
-          strategy: "structural_repair",
-          error: "Stage Timeout",
-          action: "Generated partial AppSpec from available sections and schema fallbacks",
-          outcome: "partial",
-          details: { elapsed_ms: elapsed, timeout_type: timeoutType },
         });
       }
 
@@ -971,7 +833,6 @@ if (
         data: {
           timed_out: timedOut,
           partial_spec_available: timedOut,
-          elapsed_ms: elapsed,
         },
       });
       logger.error("Stage failure", error instanceof Error ? error : new Error(errorMsg), {
@@ -982,82 +843,6 @@ if (
       throw error;
     } finally {
       clearTimeout(timeoutId);
-    }
-  }
-
-  private async _executeSpecSection(
-    jobId: string, 
-    sectionName: string, 
-    systemPrompt: string, 
-    prompt: string, 
-    schemaJson: string,
-    abortSignal: AbortSignal
-  ): Promise<Record<string, unknown>> { // Changed from any
-    try {
-      if (abortSignal.aborted) {
-        throw new Error(`Spec section ${sectionName} aborted`);
-      }
-
-      const response = await this._sendWithRetry(
-        jobId,
-        "spec",
-        [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: this._trimPromptContext(`Prompt:${prompt}\nSchema:${schemaJson}`) },
-        ],
-        0.2, // Low temperature for consistency in structured JSON
-        500, // Reduced max_tokens per section for faster turnaround
-        abortSignal
-      );
-
-      const extract = extractJSON<Record<string, unknown>>(response.content);
-      if (!extract.success || !extract.data || typeof extract.data !== "object") {
-        throw new Error(`Spec ${sectionName} extraction failed: ${extract.error ?? "invalid JSON"}`);
-      }
-
-      await jobStore.addValidationSnapshot(jobId, {
-        stage: "spec",
-        valid: true,
-        errors: [],
-        timestamp: new Date().toISOString(),
-      });
-
-      // Return the extracted data for this section
-      return extract.data;
-    } catch (error) {
-      if (abortSignal.aborted) {
-        throw error;
-      }
-
-      const message = error instanceof Error ? error.message : String(error);
-      logger.warn("Spec section generation degraded", {
-        jobId,
-        sectionName,
-        error: message,
-        timedOut: abortSignal.aborted,
-      });
-      await jobStore.addRepair(jobId, {
-        timestamp: new Date().toISOString(),
-        stage: "spec",
-        strategy: "structural_repair",
-        error: `Spec section ${sectionName} failed`,
-        action: "Preserved other sections and filled this section from deterministic defaults",
-        outcome: "partial",
-        details: { error: message },
-        timed_out: abortSignal.aborted,
-      });
-      await jobStore.addEvent(jobId, {
-        type: "stage_retry",
-        stage: "spec",
-        timestamp: new Date().toISOString(),
-        data: {
-          section: sectionName,
-          degraded: true,
-        },
-        error: message,
-        is_degraded: true,
-      });
-      return {};
     }
   }
 
