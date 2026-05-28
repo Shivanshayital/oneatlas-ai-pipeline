@@ -8,12 +8,18 @@ import { logger } from "../logging/logger";
 export const MODEL_ROUTING = {
   intent: {
     primary: "google/gemma-2-9b-it:free",
-    fallback: "mistralai/mistral-7b-instruct:free",
+    fallback: "groq/llama-3.1-8b-instant", // Diversified ecosystem
   },
 
   schema: {
-    primary: "google/gemma-2-9b-it:free",
-    fallback: "mistralai/mistral-7b-instruct:free",
+    // COMMENT: Provider diversity is critical to resilience. 
+    // Retrying within the same ecosystem (e.g. OpenRouter) during rate-limiting 
+    // causes exhaustion loops. Rotating across Groq, Gemini, and DeepSeek 
+    // ensures failover even if a specific gateway is down.
+    primary: "openrouter/google/gemma-2-9b-it:free",
+    fallback: "groq/llama-3.1-8b-instant",
+    secondaryFallback: "gemini/gemini-2.0-flash",
+    tertiaryFallback: "deepseek/deepseek-chat",
   },
 
   // Prefer faster instruct/free models for spec generation

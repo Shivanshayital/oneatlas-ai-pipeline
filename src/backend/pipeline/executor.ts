@@ -85,24 +85,17 @@ Structure:
     }
   ]
 }`;
+const SPEC_PART_META_PROMPT = `Generate AppSpec metadata, pages, and auth rules. ${COMPACT_JSON_MODE}
+Output: {"metadata":{"app_name":"str","app_type":"str"},"pages":[{"name":"str","path":"/str","title":"str","requires_auth":bool,"components":["str"]}],"auth_rules":[]}`;
 
-/**
- * COMMENT: Consolidated the fragmented prompts into a single compact APPSPEC_PROMPT.
- * Section-based generation was removed to eliminate redundant overhead and latency from multiple sequential LLM calls.
- * Compact prompts reduce token usage by avoiding repeated schema injections and metadata headers.
- * Compact generation improves free-model reliability by providing full architectural context in a single pass.
- */
-const APPSPEC_PROMPT = `
-Generate compact AppSpec JSON.
-Include:
-* pages
-* endpoints
-* workflows
-* auth
-Return valid JSON only.`;
+const SPEC_PART_ENDPOINTS_PROMPT = `Generate AppSpec API endpoints. ${COMPACT_JSON_MODE}
+Output: {"api_endpoints":[{"path":"/api/str","method":"GET|POST|PUT|DELETE","entity":"str","auth_required":bool,"response_type":"json"}]}`;
+
+const SPEC_PART_FLOWS_PROMPT = `Generate AppSpec integration hooks, workflows, and assumptions. ${COMPACT_JSON_MODE}
+Output: {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
 
 const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 3; // Initial attempt + 2 retries
-const APP_SPEC_STAGE_TIMEOUT_MS = 30_000; // Hard timeout for AppSpec stage (30 seconds)
+const APP_SPEC_STAGE_TIMEOUT_MS = 20_000; // Hard timeout for AppSpec stage (20 seconds)
 
 // ============================================================================
 // Real Pipeline Execution with Full Observability
@@ -399,11 +392,6 @@ const routes = [
   }
 
   private async _executeIntentStage(jobId: string, prompt: string): Promise<AppIntent> { // Explicit return type
-    await jobStore.addEvent(jobId, {
-      type: "stage_start",
-      stage: "intent",
-      timestamp: new Date().toISOString(),
-    });
     const stageStartTime = Date.now();
 
     try {
@@ -681,43 +669,32 @@ if (
     const stageStartTime = Date.now();
     const controller = new AbortController();
     let didTimeout = false;
-    let degradedMode = false;
+    let sectionMeta: Record<string, unknown> = {};
+    let sectionEndpoints: Record<string, unknown> = {};
+    let sectionFlows: Record<string, unknown> = {};
     const timeoutId = setTimeout(() => {
       didTimeout = true;
       logger.warn("AppSpec timeout", {
         jobId,
         timeoutMs: APP_SPEC_STAGE_TIMEOUT_MS,
       });
-      // COMMENT: Abort the ongoing fetch requests to prevent hanging connections.
       controller.abort(); // Abort the ongoing fetch requests
     }, APP_SPEC_STAGE_TIMEOUT_MS);
 
     try {
-  const schemaJson = JSON.stringify(schema, null, 2);
-
-      // COMMENT: 'generateStructuredOutput' was an invalid method as it's not defined in the AIGateway interface.
-      // We use the existing '_sendWithRetry' helper to correctly route the request through the gateway API,
-      // This preserves routing, fallback logic, and usage tracking.
-      // Structured JSON parsing is safely handled by 'extractJSON', which extracts and repairs JSON from LLM content.
-      const response = await this._sendWithRetry( // This call can throw if all providers fail
-        jobId,
-        "spec",
-        [
-          { role: "system", content: APPSPEC_PROMPT },
-          { role: "user", content: `Schema Context:\n${schemaJson}\n\nUser Request: ${prompt}` },
-        ],
-        0.2,
-        350, // max_tokens: 350
-        controller.signal
-      );
-
-      const extractResult = extractJSON<Record<string, unknown>>(response.content);
-      if (!extractResult.success || !extractResult.data) {
-        throw new Error(`Failed to extract AppSpec JSON: ${extractResult.error}`);
-      }
-
-      const specData = extractResult.data;
-      specData.data_schema = schema;
+      const schemaJson = JSON.stringify(schema, null, 2);
+      
+      // PARTIAL CHUNKING: Metadata, Endpoints, and Flows generated separately to save tokens
+      sectionMeta = await this._executeSpecSection(jobId, "meta", SPEC_PART_META_PROMPT, prompt, schemaJson, controller.signal);
+      sectionEndpoints = await this._executeSpecSection(jobId, "endpoints", SPEC_PART_ENDPOINTS_PROMPT, prompt, schemaJson, controller.signal); // Max tokens 500
+      sectionFlows = await this._executeSpecSection(jobId, "flows", SPEC_PART_FLOWS_PROMPT, prompt, schemaJson, controller.signal); // Max tokens 500
+      
+      const specData: Record<string, unknown> = {
+        ...sectionMeta,
+        ...sectionEndpoints,
+        ...sectionFlows,
+        data_schema: schema
+      };
 
       // Ensure metadata
       if (!specData.metadata) {
@@ -728,6 +705,9 @@ if (
           created_at: new Date().toISOString(),
         };
       }
+
+      // Ensure schema is included
+      specData.data_schema = schema;
 
       const { data: fieldRepairedSpec, logs: fieldRepairLogs } = repairEngine.repairFields(
         "spec",
@@ -809,38 +789,17 @@ if (
       return spec;
     } catch (error) {
       const timedOut = didTimeout || controller.signal.aborted;
-      const errorMsg = String(error);
-      let finalSpec: AppSpec;
+      const errorMsg = timedOut
+        ? `AppSpec stage exceeded ${APP_SPEC_STAGE_TIMEOUT_MS}ms`
+        : String(error);
 
-      // COMMENT: Free providers can be unstable due to rate limits, quotas, or temporary unavailability.
-      // Graceful degradation is crucial to prevent the entire pipeline from failing and to provide a usable UX.
-      // If all AI providers fail, we generate a minimal fallback AppSpec to ensure the pipeline always completes.
-      // This fallback improves UX by giving the user something to work with, even if it's not ideal.
-      const providerExhausted = errorMsg.includes("No available providers could fulfill the request");
-
-      if (timedOut || providerExhausted) {
-        degradedMode = true;
-        logger.warn(`[Executor] AppSpec stage failed due to ${timedOut ? "timeout" : "provider exhaustion"}. Generating fallback AppSpec.`, { jobId, error: errorMsg });
-        finalSpec = this._buildPartialSpec(intent, schema, {});
-        await jobStore.addRepair(jobId, {
-          timestamp: new Date().toISOString(),
-          stage: "spec",
-          strategy: "fallback_generation",
-          error: timedOut ? `AppSpec stage timed out after ${APP_SPEC_STAGE_TIMEOUT_MS}ms` : errorMsg,
-          action: "Generated minimal fallback AppSpec due to AI provider exhaustion or timeout",
-          outcome: "partial",
-          details: { degraded_mode: true, timed_out: timedOut, provider_exhausted: providerExhausted },
-        });
-      } else {
-        // If it's a different, unhandled error, re-throw it after logging.
-        await jobStore.setJobError(jobId, errorMsg);
-        await jobStore.addEvent(jobId, { type: "stage_failed", stage: "spec", timestamp: new Date().toISOString(), error: errorMsg });
-        throw error;
-      }
-      
       if (timedOut) {
         // If timeout, build and save a partial spec
-        const partialSpec = this._buildPartialSpec(intent, schema, {});
+        const partialSpec = this._buildPartialSpec(intent, schema, {
+          ...sectionMeta,
+          ...sectionEndpoints,
+          ...sectionFlows,
+        });
         await jobStore.setStageOutput(jobId, "spec", partialSpec);
         await jobStore.setPartialJobResult(jobId, {
           intent,
@@ -848,35 +807,104 @@ if (
           spec: partialSpec,
           repairs_applied: await jobStore.getRepairs(jobId),
         });
-      } else {
-        // If provider exhausted, but not timed out, we still have a finalSpec from above
-        await jobStore.setStageOutput(jobId, "spec", finalSpec);
-        await jobStore.setPartialJobResult(jobId, {
-          intent,
-          schema,
-          spec: finalSpec,
-          repairs_applied: await jobStore.getRepairs(jobId),
-        });
       }
 
+      // Record error and emit failed event
+      await jobStore.setJobError(jobId, errorMsg);
       await jobStore.addEvent(jobId, {
-        type: "stage_complete", // Mark as complete, but degraded
+        type: "stage_failed",
         stage: "spec",
         timestamp: new Date().toISOString(),
-        latency_ms: Date.now() - stageStartTime,
-        data: { pages: finalSpec.pages.length, endpoints: finalSpec.api_endpoints.length, workflows: finalSpec.workflows.length, degraded_mode: degradedMode },
+        error: errorMsg,
+        data: {
+          timed_out: timedOut,
+          partial_spec_available: timedOut,
+        },
       });
-
-      logger.warn("AppSpec stage completed in degraded mode.", {
+      logger.error("Stage failure", error instanceof Error ? error : new Error(errorMsg), {
         jobId,
         stage: "spec",
-        latencyMs: Date.now() - stageStartTime,
-        degradedMode,
+        timedOut,
       });
-
-      return finalSpec; // Return the degraded/fallback spec
+      throw error;
     } finally {
       clearTimeout(timeoutId);
+    }
+  }
+
+  private async _executeSpecSection(
+    jobId: string, 
+    sectionName: string, 
+    systemPrompt: string, 
+    prompt: string, 
+    schemaJson: string,
+    abortSignal: AbortSignal
+  ): Promise<Record<string, unknown>> { // Changed from any
+    try {
+      if (abortSignal.aborted) {
+        throw new Error(`Spec section ${sectionName} aborted`);
+      }
+
+      const response = await this._sendWithRetry(
+        jobId,
+        "spec",
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Prompt:${prompt}\nSchema:${schemaJson}` },
+        ],
+        0.2,
+        500, // Max tokens for each spec section
+        abortSignal
+      );
+
+      const extract = extractJSON<Record<string, unknown>>(response.content);
+      if (!extract.success || !extract.data || typeof extract.data !== "object") {
+        throw new Error(`Spec ${sectionName} extraction failed: ${extract.error ?? "invalid JSON"}`);
+      }
+
+      await jobStore.addValidationSnapshot(jobId, {
+        stage: "spec",
+        valid: true,
+        errors: [],
+        timestamp: new Date().toISOString(),
+      });
+
+      // Return the extracted data for this section
+      return extract.data;
+    } catch (error) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn("Spec section generation degraded", {
+        jobId,
+        sectionName,
+        error: message,
+        timedOut: abortSignal.aborted,
+      });
+      await jobStore.addRepair(jobId, {
+        timestamp: new Date().toISOString(),
+        stage: "spec",
+        strategy: "structural_repair",
+        error: `Spec section ${sectionName} failed`,
+        action: "Preserved other sections and filled this section from deterministic defaults",
+        outcome: "partial",
+        details: { error: message },
+        timed_out: abortSignal.aborted,
+      });
+      await jobStore.addEvent(jobId, {
+        type: "stage_retry",
+        stage: "spec",
+        timestamp: new Date().toISOString(),
+        data: {
+          section: sectionName,
+          degraded: true,
+        },
+        error: message,
+        is_degraded: true,
+      });
+      return {};
     }
   }
 
