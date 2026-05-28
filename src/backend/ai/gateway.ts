@@ -663,8 +663,10 @@ export class MultiProviderGateway implements AIGateway {
     if (config.deepseek) {
       this.providers.set("deepseek", new DeepSeekProvider(config.deepseek.apiKey));
     }
-    if (config.openrouter) {
-      this.providers.set("openrouter", new OpenRouterProvider(config.openrouter.apiKey));
+    
+    const openRouterKey = config.openrouter?.apiKey || process.env.OPENROUTER_API_KEY;
+    if (openRouterKey) {
+      this.providers.set("openrouter", new OpenRouterProvider(openRouterKey));
     }
   }
 
@@ -925,8 +927,8 @@ export class AIGatewayWithFallback implements AIGateway {
       this._logProviderSkipOnce(request.provider);
     }
 
-    // Fallback selection order: OpenRouter is unified, then individual providers
-    const fallbackOrder: AIProvider[] = ["openrouter", "gemini", "deepseek", "groq", "openai"];
+    // Fallback selection order: Gemini -> OpenRouter -> Groq -> DeepSeek -> OpenAI
+    const fallbackOrder: AIProvider[] = ["gemini", "openrouter", "groq", "deepseek", "openai"];
 
     // Default model mapping per provider (safe fallbacks)
     const DEFAULT_MODEL: Record<AIProvider, string> = {
@@ -936,7 +938,7 @@ export class AIGatewayWithFallback implements AIGateway {
       openai: "gpt-4o-mini", // OpenAI's cost-effective model
       anthropic: "",
       mistral: "",
-      openrouter: "google/gemini-2.5-flash",
+      openrouter: "google/gemini-2.5-flash", // Primary OpenRouter fallback model
     };
 
     let lastError: Error | null = null;
