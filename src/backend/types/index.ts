@@ -138,11 +138,9 @@ export interface StageEvent {
   tokens?: TokenMetrics;
   cost_usd?: number;
   cooldown_until?: string;
-  failure_reason?: string;
   error?: string;
   is_fallback?: boolean;
   previous_provider?: AIProvider;
-  failure_reason?: string;
   is_degraded?: boolean;
 }
 

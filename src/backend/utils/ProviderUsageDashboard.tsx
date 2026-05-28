@@ -73,7 +73,7 @@ const ProviderUsageDashboard: React.FC<ProviderUsageDashboardProps> = ({
                   className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
                     displayStatus === "active"
                       ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
-                      : displayStatus === "unhealthy"
+                      : displayStatus === "failed"
                       ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
                       : "bg-slate-100 text-slate-800 dark:bg-slate-700 dark:text-slate-300"
                   }`}
