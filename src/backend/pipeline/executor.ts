@@ -10,6 +10,7 @@ import {
   AIProvider,
   AIResponse,
   PipelineMetrics, // Keep PipelineMetrics
+  DataField, // Import DataField for fallback entity generation
   PipelineStage,
 } from "../types/index";
 import { AIGateway, MODEL_ROUTING, getModelHealthScore, resolveProviderAndModel } from "../ai/gateway";
@@ -116,6 +117,17 @@ export class PipelineExecutor {
     this.costTracker = new CostTracker();
   }
 
+  /**
+   * Helper to slugify a string and pluralize it for use as a table name.
+   * @param name The singular entity name.
+   * @returns A slugified and pluralized string.
+   */
+  private _slugifyAndPluralize(name: string): string {
+    // Convert to lowercase and replace spaces with underscores
+    const slug = name.toLowerCase().replace(/\s+/g, '_');
+    // Simple pluralization: add 's' if not already ending in 's'
+    return slug.endsWith('s') ? slug : slug + 's';
+  }
   private async _updateMetrics(jobId: string): Promise<void> {
     const totals = this.costTracker.getTotals();
     const state = await jobStore.getJob(jobId);
@@ -498,6 +510,75 @@ const routes = [
     }
   }
 
+  /**
+   * Generates a minimal fallback DataEntity based on the app intent.
+   * This is used when the AI model fails to produce a valid or non-empty schema.
+   * @param intent The extracted AppIntent.
+   * @returns A DataEntity object.
+   */
+  // COMMENT: Free models, especially smaller ones, can sometimes struggle with complex JSON structures
+  // and might return empty arrays or incomplete objects, leading to validation failures.
+  // This fallback mechanism ensures that the pipeline can recover from such cases by
+  // deterministically generating a minimal, valid schema based on the extracted intent.
+  // This improves the overall reliability and stability of the generation process,
+  // preventing hard failures and allowing the pipeline to continue with a usable (though basic) output.
+  // This "repair-first" architecture is crucial in LLM systems to handle model imperfections gracefully.
+  private _generateFallbackEntity(intent: AppIntent): DataEntity {
+    let entityName = "Item";
+    const additionalFields: DataField[] = [];
+
+    const promptContext = `${intent.appName.toLowerCase()} ${intent.features.join(" ").toLowerCase()} ${intent.entities.join(" ").toLowerCase()}`;
+
+    // Prioritize direct keyword matches from prompt context or appType
+    if (promptContext.includes("todo") || promptContext.includes("task") || intent.appType === "project_management") {
+      entityName = "Task";
+      additionalFields.push({ name: "title", type: "string", required: true });
+      additionalFields.push({ name: "status", type: "enum", enum_values: ["todo", "in_progress", "done"], required: true });
+    } else if (promptContext.includes("ecommerce") || promptContext.includes("product") || promptContext.includes("order") || promptContext.includes("shop") || intent.appType === "ecommerce") {
+      entityName = "Product";
+      additionalFields.push({ name: "name", type: "string", required: true });
+      additionalFields.push({ name: "price", type: "number", required: true });
+    } else if (promptContext.includes("chat") || promptContext.includes("message")) {
+      entityName = "Message";
+      additionalFields.push({ name: "content", type: "string", required: true });
+      additionalFields.push({ name: "senderId", type: "uuid", required: true });
+    } else if (promptContext.includes("crm") || promptContext.includes("customer") || intent.appType === "crm") {
+      entityName = "Customer";
+      additionalFields.push({ name: "name", type: "string", required: true });
+      additionalFields.push({ name: "email", type: "string", required: false });
+    } else if (promptContext.includes("blog") || promptContext.includes("post")) {
+      entityName = "Post";
+      additionalFields.push({ name: "title", type: "string", required: true });
+      additionalFields.push({ name: "content", type: "string", required: true });
+    } else {
+      // Default to generic "Item" if nothing else matches
+      entityName = "Item";
+      additionalFields.push({ name: "name", type: "string", required: true });
+    }
+
+    // Ensure basic required fields are always present
+    const baseFields: DataField[] = [
+      { name: "id", type: "uuid", required: true },
+      { name: "tenantId", type: "uuid", required: true },
+      { name: "createdAt", type: "timestamp", required: true },
+      { name: "updatedAt", type: "timestamp", required: true },
+    ];
+
+    // Combine base fields with additional fields, avoiding duplicates by name
+    const fieldsMap = new Map<string, DataField>();
+    [...baseFields, ...additionalFields].forEach(field => {
+      fieldsMap.set(field.name, field);
+    });
+
+    return {
+      name: entityName,
+      tableName: this._slugifyAndPluralize(entityName),
+      fields: Array.from(fieldsMap.values()),
+      relations: [],
+      description: `Fallback entity generated due to empty schema from AI for a ${intent.appType} app.`,
+    };
+  }
+
   private async _executeSchemaStage( // Explicit return type
     jobId: string,
     intent: AppIntent,
@@ -540,10 +621,35 @@ const routes = [
 
       const extractResult = extractJSON(response.content);
       if (!extractResult.success || extractResult.data === null) {
+        // COMMENT: If the model fails to return valid JSON, it's a structural issue.
+        // The extractJSON utility attempts to repair common JSON malformations.
         throw new Error(`Failed to extract schema JSON: ${extractResult.error}`);
       }
 
       const schemaData = extractResult.data as Record<string, unknown>;
+
+      // COMMENT: Free models, especially smaller ones, can sometimes struggle with complex JSON structures
+      // and might return empty arrays or incomplete objects, leading to validation failures.
+      // This fallback mechanism ensures that the pipeline can recover from such cases by
+      // deterministically generating a minimal, valid schema based on the extracted intent.
+      // This improves the overall reliability and stability of the generation process,
+      // preventing hard failures and allowing the pipeline to continue with a usable (though basic) output.
+      // This "repair-first" architecture is crucial in LLM systems to handle model imperfections gracefully.
+      if (!schemaData.entities || (Array.isArray(schemaData.entities) && schemaData.entities.length === 0)) {
+        logger.warn(`[Executor] Schema generation returned empty entities. Applying fallback entity generation.`, { jobId });
+        const fallbackEntity = this._generateFallbackEntity(intent);
+        schemaData.entities = [fallbackEntity];
+
+        await jobStore.addRepair(jobId, {
+          timestamp: new Date().toISOString(),
+          stage: "schema",
+          strategy: "field_repair",
+          error: "Schema entities array was empty or missing.",
+          action: `Generated fallback entity '${fallbackEntity.name}' based on app intent.`,
+          outcome: "partial",
+          details: { generated_entity: fallbackEntity.name },
+        });
+      }
 
 // ============================================================================
 // FIELD TYPE NORMALIZATION
