@@ -34,103 +34,23 @@ import {
 // System Prompts for Each Stage
 // ============================================================================
 
-const INTENT_EXTRACTION_PROMPT = `Extract the app intent from the user's description. Return ONLY valid JSON (no markdown, no explanation).
+const COMPACT_MODE = "Return minified JSON only. No markdown. No explanations.";
 
-Return a JSON object with EXACTLY this structure:
-{
-  "appName": "string (max 200 chars)",
-  "appType": "crm|project_management|ecommerce|hr_tool|inventory|analytics|custom",
-  "features": ["array", "of", "feature", "names"],
-  "entities": ["array", "of", "entity", "names"],
-  "integrations_requested": ["array", "of", "integration", "ids"],
-  "assumptions": ["array", "of", "key", "assumptions"]
-}
+const INTENT_EXTRACTION_PROMPT = `Extract app intent. ${COMPACT_MODE}
+Structure: {"appName":"string","appType":"crm|project_management|ecommerce|hr_tool|inventory|analytics|custom","features":["strings"],"entities":["strings"],"integrations_requested":["slack|gmail|whatsapp|stripe|webhook"],"assumptions":["strings"]}`;
 
-Rules:
-- appName: short, descriptive name for the app
-- appType: classify the business domain, not the platform. Use crm for sales/deal/customer pipelines, project_management for task/project/team tools, ecommerce for stores/orders, hr_tool for people/recruiting, inventory for stock/warehouse, analytics for dashboards/reporting, otherwise custom.
-- features: 3-10 feature names
-- entities: 2-8 entity types (User, Task, Order, etc.)
-- integrations_requested: integration IDs from [slack, gmail, whatsapp, stripe, webhook]
-- assumptions: reasonable assumptions to proceed
+const SCHEMA_GENERATION_PROMPT = `Generate data schema. ${COMPACT_MODE}
+Required: "id" and "tenantId" (uuid) per entity.
+Structure: {"schema_version":"1.0.0","entities":[{"name":"String","tableName":"string","fields":[{"name":"string","type":"string","required":true}],"relations":[]}]}`;
 
-CRITICAL: Return ONLY JSON. No markdown. No explanation. No extra text.`;
+const SPEC_PART_META_PROMPT = `Generate Spec Metadata and Pages. ${COMPACT_MODE}
+Structure: {"metadata":{"app_name":"string","app_type":"string"},"pages":[{"name":"string","path":"/string","title":"string","requires_auth":true,"components":["string"]}],"auth_rules":[]}`;
 
-const SCHEMA_GENERATION_PROMPT = `Generate a complete data schema based on this app intent. Return ONLY valid JSON (no markdown).
+const SPEC_PART_ENDPOINTS_PROMPT = `Generate API Endpoints for schema. ${COMPACT_MODE}
+Structure: {"api_endpoints":[{"path":"/api/string","method":"GET|POST|PUT|DELETE","entity":"string","auth_required":true,"response_type":"json"}]}`;
 
-Return a JSON object with EXACTLY this structure:
-{
-  "schema_version": "1.0.0",
-  "entities": [
-    {
-      "name": "EntityName",
-      "tableName": "entity_names",
-      "fields": [
-        {
-          "name": "id",
-          "type": "uuid",
-          "required": true
-        },
-        {
-          "name": "tenantId",
-          "type": "uuid",
-          "required": true
-        }
-      ],
-      "relations": []
-    }
-  ]
-}
-
-Rules:
-- EVERY entity MUST have "id" and "tenantId" fields
-- Field types: string, number, boolean, date, timestamp, uuid, json, enum
-- Include enum_values for enum type fields
-- Relations: from_entity → to_entity with cardinality
-- Ensure bidirectional consistency
-- Minimum 2 fields per entity (id, tenantId)
-
-CRITICAL: Return ONLY JSON. Every entity MUST have tenantId.`;
-
-const SPEC_GENERATION_PROMPT = `Generate a complete application specification. Return ONLY valid JSON (no markdown).
-
-Return a JSON object with EXACTLY this structure:
-{
-  "metadata": {
-    "app_name": "string",
-    "app_type": "string",
-    "version": "1.0.0",
-    "created_at": "ISO timestamp"
-  },
-  "data_schema": {...},
-  "pages": [{
-    "name": "page_name",
-    "path": "/path",
-    "title": "Page Title",
-    "requires_auth": false,
-    "components": ["component1"]
-  }],
-  "api_endpoints": [{
-    "path": "/api/endpoint",
-    "method": "GET|POST|PUT|DELETE",
-    "entity": "EntityName",
-    "auth_required": false,
-    "response_type": "json"
-  }],
-  "auth_rules": [],
-  "integration_hooks": [],
-  "workflows": [],
-  "assumptions": []
-}
-
-Rules:
-- Paths must start with /
-- Every page needs matching API endpoint
-- Workflows reference valid entities
-- Integration hooks reference valid integrations
-- At least 2 pages, 2 API endpoints
-
-CRITICAL: Return ONLY JSON. No markdown. Valid structure.`;
+const SPEC_PART_FLOWS_PROMPT = `Generate Workflows and Hooks. ${COMPACT_MODE}
+Structure: {"integration_hooks":[{"integration_id":"string","trigger":"string","action":"string"}],"workflows":[{"name":"string","trigger_type":"event","trigger_entity":"string","steps":[]}],"assumptions":[]}`;
 
 // ============================================================================
 // Real Pipeline Execution with Full Observability
@@ -228,8 +148,6 @@ export class PipelineExecutor {
   private async _sendWithRetry( // Explicit return type
     jobId: string,
     stage: PipelineStage,
-    _primaryRoute: string,
-    _fallbackRoute: string,
     messages: AIMessage[],
     temperature: number,
     max_tokens: number
@@ -407,31 +325,27 @@ export class PipelineExecutor {
     const stageStartTime = Date.now();
 
     try {
-      const primaryRoute = MODEL_ROUTING.intent.primary;
-      const fallbackRoute = MODEL_ROUTING.intent.fallback;
-      const [primaryProvider, primaryModel] = primaryRoute.split("/") as [AIProvider, string];
+      const modelRoutingConfig = MODEL_ROUTING.intent;
 
       jobStore.addEvent(jobId, {
         type: "stage_start",
         stage: "intent",
         timestamp: new Date().toISOString(),
         data: {
-          provider: primaryProvider,
-          model: primaryModel,
+          provider: modelRoutingConfig.primary.split("/")[0] as AIProvider,
+          model: modelRoutingConfig.primary.split("/")[1],
         },
       });
 
       const response = await this._sendWithRetry(
         jobId,
         "intent",
-        primaryRoute,
-        fallbackRoute,
         [
           { role: "system", content: INTENT_EXTRACTION_PROMPT },
           { role: "user", content: prompt },
         ],
-        0.3, // Lower temperature for more deterministic intent extraction
-        512 // Optimized for free-tier/speed
+        0.2, 
+        300 
       );
 
       // Extract JSON with repairs
@@ -516,9 +430,7 @@ export class PipelineExecutor {
     const stageStartTime = Date.now();
 
     try {
-      const primaryRoute = MODEL_ROUTING.schema.primary;
-      const fallbackRoute = MODEL_ROUTING.schema.fallback;
-      const [primaryProvider, primaryModel] = primaryRoute.split("/") as [AIProvider, string];
+      const modelRoutingConfig = MODEL_ROUTING.schema;
 
       const intentSummary = `App: ${intent.appName}\nType: ${intent.appType}\nFeatures: ${intent.features.join(", ")}\nEntities: ${intent.entities.join(", ")}`;
 
@@ -527,16 +439,14 @@ export class PipelineExecutor {
         stage: "schema",
         timestamp: new Date().toISOString(),
         data: {
-          provider: primaryProvider,
-          model: primaryModel,
+          provider: modelRoutingConfig.primary.split("/")[0] as AIProvider,
+          model: modelRoutingConfig.primary.split("/")[1],
         },
       });
 
       const response = await this._sendWithRetry(
         jobId,
         "schema",
-        primaryRoute,
-        fallbackRoute,
         [
           { role: "system", content: SCHEMA_GENERATION_PROMPT },
           {
@@ -544,8 +454,8 @@ export class PipelineExecutor {
             content: `Original user request: "${prompt}"\n\nExtracted intent:\n${intentSummary}`,
           },
         ],
-        0.4, // Slightly higher temperature for creativity in schema generation
-        1024 // Optimized for free-tier
+        0.3, 
+        600 
       );
 
       const extractResult = extractJSON(response.content);
@@ -644,43 +554,21 @@ export class PipelineExecutor {
 
     try {
       const primaryRoute = MODEL_ROUTING.spec.primary;
-      const fallbackRoute = MODEL_ROUTING.spec.fallback;
-      const [primaryProvider, primaryModel] = primaryRoute.split("/") as [AIProvider, string];
+      const [_primaryProvider, _primaryModel] = primaryRoute.split("/") as [AIProvider, string];
 
       const schemaJson = JSON.stringify(schema, null, 2);
+      
+      // PARTIAL CHUNKING: Metadata, Endpoints, and Flows generated separately to save tokens
+      const sectionMeta = await this._executeSpecSection(jobId, "meta", SPEC_PART_META_PROMPT, prompt, schemaJson);
+      const sectionEndpoints = await this._executeSpecSection(jobId, "endpoints", SPEC_PART_ENDPOINTS_PROMPT, prompt, schemaJson);
+      const sectionFlows = await this._executeSpecSection(jobId, "flows", SPEC_PART_FLOWS_PROMPT, prompt, schemaJson);
 
-      jobStore.addEvent(jobId, {
-        type: "stage_start",
-        stage: "spec",
-        timestamp: new Date().toISOString(),
-        data: {
-          provider: primaryProvider,
-          model: primaryModel,
-        },
-      });
-
-      const response = await this._sendWithRetry(
-        jobId,
-        "spec",
-        primaryRoute,
-        fallbackRoute,
-        [
-          { role: "system", content: SPEC_GENERATION_PROMPT },
-          {
-            role: "user",
-            content: `Original request: "${prompt}"\n\nSchema to implement:\n${schemaJson}`,
-          },
-        ],
-        0.4, // Moderate temperature for balanced creativity and adherence to schema
-        1024 // Keep prompts compact for free-tier testing
-      );
-
-      const extractResult = extractJSON(response.content);
-      if (!extractResult.success || extractResult.data === null) {
-        throw new Error(`Failed to extract spec JSON: ${extractResult.error}`);
-      }
-
-      const specData = extractResult.data as Record<string, unknown>;
+      const specData: Record<string, unknown> = {
+        ...sectionMeta,
+        ...sectionEndpoints,
+        ...sectionFlows,
+        data_schema: schema
+      };
 
       // Ensure metadata
       if (!specData.metadata) {
@@ -759,6 +647,29 @@ export class PipelineExecutor {
       });
       throw error;
     }
+  }
+
+  private async _executeSpecSection(
+    jobId: string, 
+    sectionName: string, 
+    systemPrompt: string, 
+    prompt: string, 
+    schemaJson: string
+  ): Promise<Record<string, unknown>> { // Changed from any
+    const response = await this._sendWithRetry(
+      jobId,
+      "spec",
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Context: ${prompt}\nSchema: ${schemaJson}` },
+      ],
+      0.3,
+      500 // Limit each section
+    );
+
+    const extract = extractJSON(response.content);
+    if (!extract.success || !extract.data) throw new Error(`Spec ${sectionName} extraction failed`);
+    return extract.data as Record<string, unknown>; // Cast to unknown
   }
 
   private _ensureMinimumSpec( // Explicit return type

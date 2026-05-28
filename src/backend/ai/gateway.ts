@@ -265,7 +265,7 @@ class OpenAIProvider {
       model,
       messages: messages as OpenAIMessage[],
       temperature: temperature ?? 0.7,
-      max_tokens: max_tokens ?? 2048,
+      max_tokens: max_tokens ?? 1024,
     };
 
     const controller = new AbortController();
@@ -351,7 +351,7 @@ class GroqProvider {
       model,
       messages: messages as GroqMessage[],
       temperature: temperature ?? 0.7,
-      max_tokens: max_tokens ?? 2048,
+      max_tokens: max_tokens ?? 1024,
     };
 
     const controller = new AbortController();
@@ -440,7 +440,7 @@ class GeminiProvider {
       contents,
       generationConfig: {
         temperature: temperature ?? 0.7,
-        maxOutputTokens: max_tokens ?? 2048,
+        maxOutputTokens: max_tokens ?? 1024,
       },
     };
 

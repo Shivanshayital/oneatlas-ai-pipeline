@@ -84,7 +84,14 @@ export async function GET(
     // Check if job exists
     const job = orchestrator.getJob(jobId);
     if (!job) {
-      return NextResponse.json({ error: "Job not found" }, { status: 404 });
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Job expired or not found",
+          recoverable: true,
+        },
+        { status: 404 }
+      );
     }
 
     // For already completed jobs, send cached events

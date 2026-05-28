@@ -3,6 +3,7 @@ import {
   PipelineJob,
   StageEvent,
 } from "../types";
+import { logger } from "../logging/logger";
 import { MultiProviderGateway } from "../ai/gateway";
 import { jobStore } from "../store/job-store";
 
@@ -33,6 +34,12 @@ export class PipelineOrchestrator {
   }
 
   getJob(jobId: string): PipelineJob | undefined {
-    return jobStore.getJob(jobId)?.job;
+    const state = jobStore.getJob(jobId);
+    if (!state) {
+      // Graceful detection: log the miss as it's a known side effect of serverless memory resets
+      logger.warn(`[Orchestrator] Job ${jobId} not found in memory. This usually occurs after a Vercel serverless instance cold start.`);
+      return undefined;
+    }
+    return state.job;
   }
 }
