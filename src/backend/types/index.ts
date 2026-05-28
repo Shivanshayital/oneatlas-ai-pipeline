@@ -137,6 +137,8 @@ export interface StageEvent {
   model?: string;
   tokens?: TokenMetrics;
   cost_usd?: number;
+  cooldown_until?: string;
+  failure_reason?: string;
   error?: string;
   is_fallback?: boolean;
   previous_provider?: AIProvider;
@@ -307,7 +309,9 @@ export interface ProviderUsageSummaryItem {
   totalTokens: number;
   estimatedCost: number;
   latencyMs: number; // Average latency
-  status: "active" | "inactive" | "healthy" | "unhealthy" | "cooldown";
+  status: "healthy" | "active" | "inactive" | "cooldown" | "failed";
+  cooldownUntil?: string;
+  failureReason?: string;
   estimatedRemainingQuota: number;
   quotaStatus: 'low' | 'medium' | 'high' | 'near_limit' | 'unknown';
   failures: number;

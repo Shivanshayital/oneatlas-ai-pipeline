@@ -1,4 +1,5 @@
-import { AIProvider, TokenMetrics } from "../types";
+import { AIProvider, TokenMetrics, ProviderUsageSummaryItem } from "../types";
+import { providerHealth } from "./gateway";
 
 // ============================================================================
 // Token Pricing (per 1M tokens) - as of May 2026, subject to change
@@ -95,13 +96,21 @@ export class CostTracker {
     };
   }
 
-  getProviderUsage(provider: AIProvider): { inputTokens: number; outputTokens: number; costUsd: number; requests: number; totalTokens: number; estimatedRemainingQuota: number; quotaStatus: 'low' | 'medium' | 'high' | 'near_limit' | 'unknown' } { // Explicit return type
+  getProviderUsage(provider: AIProvider): ProviderUsageSummaryItem {
     const usage = this.providerUsage.get(provider) || { inputTokens: 0, outputTokens: 0, costUsd: 0, requests: 0 };
     const totalTokens = usage.inputTokens + usage.outputTokens;
     const quotaInfo = FREE_TIER_QUOTA_ESTIMATES[provider];
     
     let estimatedRemainingQuota = 0;
     let quotaStatus: 'low' | 'medium' | 'high' | 'near_limit' | 'unknown' = 'unknown';
+    
+    // Cooldown and Status logic
+    const isHealthy = providerHealth.isHealthy(provider);
+    const cooldownUntil = providerHealth.getCooldownUntil(provider);
+    const reason = providerHealth.getReason(provider);
+
+    let status: ProviderUsageSummaryItem['status'] = isHealthy ? 'healthy' : 'cooldown';
+    if (usage.requests === 0 && isHealthy) status = 'active';
 
     if (quotaInfo) {
       estimatedRemainingQuota = Math.max(0, quotaInfo.totalTokens - totalTokens);
@@ -112,11 +121,25 @@ export class CostTracker {
       else quotaStatus = 'near_limit';
     }
 
-    return { ...usage, totalTokens, estimatedRemainingQuota, quotaStatus };
+    return {
+      provider,
+      requests: usage.requests,
+      promptTokens: usage.inputTokens,
+      completionTokens: usage.outputTokens,
+      totalTokens,
+      estimatedCost: usage.costUsd,
+      latencyMs: 0, // Calculated elsewhere or averaged
+      status,
+      cooldownUntil: cooldownUntil ? new Date(cooldownUntil).toISOString() : undefined,
+      failureReason: reason,
+      estimatedRemainingQuota,
+      quotaStatus,
+      failures: 0 // Tracked via retry history
+    };
   }
 
-  getAllProviderUsage(): Map<AIProvider, { inputTokens: number; outputTokens: number; costUsd: number; requests: number; totalTokens: number; estimatedRemainingQuota: number; quotaStatus: 'low' | 'medium' | 'high' | 'near_limit' | 'unknown' }> { // Explicit return type
-    const allUsage = new Map<AIProvider, { inputTokens: number; outputTokens: number; costUsd: number; requests: number; totalTokens: number; estimatedRemainingQuota: number; quotaStatus: 'low' | 'medium' | 'high' | 'near_limit' | 'unknown' }>();
+  getAllProviderUsage(): Map<AIProvider, ProviderUsageSummaryItem> {
+    const allUsage = new Map<AIProvider, ProviderUsageSummaryItem>();
     for (const provider of Object.keys(FREE_TIER_QUOTA_ESTIMATES) as AIProvider[]) {
       allUsage.set(provider, this.getProviderUsage(provider));
     }

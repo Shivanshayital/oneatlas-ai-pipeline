@@ -1,4 +1,5 @@
 import { AIProvider, AIRequest, AIResponse } from "../types";
+import { logger } from "../logging/logger";
 
 // ============================================================================
 // Model Routing Configuration
@@ -102,9 +103,10 @@ function requireContent(content: string | undefined, provider: AIProvider): stri
 // ============================================================================
 
 const PROVIDER_HEALTH_COOLDOWNS_MS = {
-  quota: 15 * 60 * 1000,
-  rate_limit: 2 * 60 * 1000,
-  timeout: 60 * 1000,
+  quota: 60 * 60 * 1000,        // 1 hour
+  rate_limit: 15 * 60 * 1000,   // 15 minutes
+  timeout: 2 * 60 * 1000,       // 2 minutes
+  unavailable: 5 * 60 * 1000,   // 5 minutes
   transient: 30 * 1000,
 } as const;
 
@@ -124,11 +126,22 @@ class ProviderHealthCache {
     if (!state) return true;
 
     if (Date.now() >= state.unhealthyUntil) {
+      logger.info(`Provider recovery: ${provider} is now healthy again.`);
       this.states.delete(provider);
       return true;
     }
 
     return false;
+  }
+
+  getCooldownUntil(provider: AIProvider): number | undefined {
+    const state = this.states.get(provider);
+    if (!state) return undefined;
+    if (Date.now() >= state.unhealthyUntil) {
+      this.states.delete(provider);
+      return undefined;
+    }
+    return state.unhealthyUntil;
   }
 
   getReason(provider: AIProvider): string | undefined {
@@ -146,8 +159,12 @@ class ProviderHealthCache {
   markFailure(provider: AIProvider, error: unknown): void {
     const message = this._errorMessage(error);
     const cooldownMs = this._cooldownForError(message);
+    const until = Date.now() + cooldownMs;
+    
+    logger.warn(`Provider cooldown start: ${provider} for ${cooldownMs / 1000}s. Reason: ${message}`);
+    
     this.states.set(provider, {
-      unhealthyUntil: Date.now() + cooldownMs,
+      unhealthyUntil: until,
       reason: message,
       lastLoggedAt: this.states.get(provider)?.lastLoggedAt ?? 0,
     });
@@ -176,6 +193,9 @@ class ProviderHealthCache {
     }
     if (normalized.includes("abort") || normalized.includes("timeout")) {
       return PROVIDER_HEALTH_COOLDOWNS_MS.timeout;
+    }
+    if (normalized.includes("unavailable") || normalized.includes("no endpoints found") || normalized.includes("model not found")) {
+      return PROVIDER_HEALTH_COOLDOWNS_MS.unavailable;
     }
     return PROVIDER_HEALTH_COOLDOWNS_MS.transient;
   }
