@@ -16,9 +16,11 @@ export const MODEL_ROUTING = {
     fallback: "mistralai/mistral-7b-instruct:free",
   },
 
+  // Prefer faster instruct/free models for spec generation
   spec: {
-    primary: "mistralai/mistral-7b-instruct:free",
-    fallback: "google/gemma-2-9b-it:free",
+    primary: "openrouter/google/gemma-2-9b-it:free",
+    fallback: "openrouter/mistralai/mistral-7b-instruct:free",
+    secondaryFallback: "openrouter/meta-llama/llama-3.1-8b-instruct:free",
   },
 } as const;
 

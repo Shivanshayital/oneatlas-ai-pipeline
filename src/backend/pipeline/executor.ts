@@ -36,12 +36,12 @@ import {
 // ============================================================================
 // System Prompts for Each Stage
 // ============================================================================
-const COMPACT_MODE = "Return minified JSON only. No markdown. No explanations.";
+const COMPACT_JSON_MODE = "Return minified JSON only. No markdown, no explanations.";
 
-const INTENT_EXTRACTION_PROMPT = `Extract app intent. ${COMPACT_MODE}
-Structure: {"appName":"string","appType":"crm|project_management|ecommerce|hr_tool|inventory|analytics|custom","features":["strings"],"entities":["strings"],"integrations_requested":["slack|gmail|whatsapp|stripe|webhook"],"assumptions":["strings"]}`;
+const INTENT_EXTRACTION_PROMPT = `Extract app intent. ${COMPACT_JSON_MODE}
+Output: {"appName":"string","appType":"crm|project_management|ecommerce|hr_tool|inventory|analytics|custom","features":["strings"],"entities":["strings"],"integrations_requested":["slack|gmail|whatsapp|stripe|webhook"],"assumptions":["strings"]}`;
 
-const SCHEMA_GENERATION_PROMPT = `Generate data schema. ${COMPACT_MODE}
+const SCHEMA_GENERATION_PROMPT = `Generate data schema. ${COMPACT_JSON_MODE}
 
 Required:
 - Every entity MUST include:
@@ -85,14 +85,17 @@ Structure:
     }
   ]
 }`;
-const SPEC_PART_META_PROMPT = `Gen Spec Meta+Pages. JSON ONLY. {"metadata":{"app_name":"str","app_type":"str"},"pages":[{"name":"str","path":"/str","title":"str","requires_auth":bool,"components":["str"]}],"auth_rules":[]}`;
+const SPEC_PART_META_PROMPT = `Generate AppSpec metadata, pages, and auth rules. ${COMPACT_JSON_MODE}
+Output: {"metadata":{"app_name":"str","app_type":"str"},"pages":[{"name":"str","path":"/str","title":"str","requires_auth":bool,"components":["str"]}],"auth_rules":[]}`;
 
-const SPEC_PART_ENDPOINTS_PROMPT = `Gen API Endpoints. JSON ONLY. {"api_endpoints":[{"path":"/api/str","method":"GET|POST|PUT|DELETE","entity":"str","auth_required":bool,"response_type":"json"}]}`;
+const SPEC_PART_ENDPOINTS_PROMPT = `Generate AppSpec API endpoints. ${COMPACT_JSON_MODE}
+Output: {"api_endpoints":[{"path":"/api/str","method":"GET|POST|PUT|DELETE","entity":"str","auth_required":bool,"response_type":"json"}]}`;
 
-const SPEC_PART_FLOWS_PROMPT = `Gen Workflows. JSON ONLY. {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
+const SPEC_PART_FLOWS_PROMPT = `Generate AppSpec integration hooks, workflows, and assumptions. ${COMPACT_JSON_MODE}
+Output: {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
 
-const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 5;
-const APP_SPEC_STAGE_TIMEOUT_MS = 90_000;
+const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 3; // Initial attempt + 2 retries
+const APP_SPEC_STAGE_TIMEOUT_MS = 20_000; // Hard timeout for AppSpec stage (20 seconds)
 
 // ============================================================================
 // Real Pipeline Execution with Full Observability
@@ -198,13 +201,12 @@ export class PipelineExecutor {
     abortSignal?: AbortSignal
   ): Promise<AIResponse> { // Explicit return type
     const modelRoutingConfig = MODEL_ROUTING[stage as keyof typeof MODEL_ROUTING];
-    type RoutingConfig = {
+    interface RoutingConfig {
   primary: string;
   fallback?: string;
   secondaryFallback?: string;
   tertiaryFallback?: string;
 };
-
 const typedRoutingConfig = modelRoutingConfig as RoutingConfig;
 
 const routes = [
@@ -216,7 +218,7 @@ const routes = [
     let lastError: Error | null = null;
     const attemptedRoutes = new Set<string>();
 
-    const maxAttempts = Math.min(routes.length, MAX_EXECUTOR_PROVIDER_ATTEMPTS);
+    const maxAttempts = Math.min(routes.length, MAX_EXECUTOR_PROVIDER_ATTEMPTS); // Limit to 3 attempts (initial + 2 retries)
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (abortSignal?.aborted) {
@@ -226,7 +228,7 @@ const routes = [
       const route = routes[attempt];
       // Use the new helper function to resolve provider and model
       const { provider, model } = resolveProviderAndModel(route);
-      const routeKey = `${provider}/${model}`;
+      const routeKey = `${provider}/${model}`; // Track attempted routes to avoid redundant calls
       if (attemptedRoutes.has(routeKey)) {
         continue;
       }
@@ -290,7 +292,7 @@ const routes = [
           error: errorMessage,
           timestamp: new Date().toISOString(),
         });
-
+        // Emit event for each retry attempt
         await jobStore.addEvent(jobId, {
           type: "stage_retry",
           stage,
@@ -416,8 +418,8 @@ const routes = [
           { role: "system", content: INTENT_EXTRACTION_PROMPT },
           { role: "user", content: prompt },
         ],
-        0.2, 
-        300 
+        0.2, // Low temperature for factual extraction
+        500 // Max tokens for intent extraction
       );
 
       // Extract JSON with repairs
@@ -430,6 +432,7 @@ const routes = [
       const intentSource = extractResult.data as Record<string, unknown>;
       intentSource.appType = this._normalizeAppType(prompt, String(intentSource.appType ?? ""));
       const intentRepair = repairIntentData(intentSource, prompt);
+      // Apply deterministic repairs from repairIntentData
       Object.assign(intentSource, intentRepair.data);
 
       for (const log of intentRepair.logs) {
@@ -451,7 +454,7 @@ const routes = [
         requiredFields
       );
 
-      for (const log of repairLogs) {
+      for (const log of repairLogs) { // Log field repairs
         await jobStore.addRepair(jobId, log);
       }
 
@@ -531,8 +534,8 @@ const routes = [
             content: `Original user request: "${prompt}"\n\nExtracted intent:\n${intentSummary}`,
           },
         ],
-        0.3, 
-        600 
+        0.3, // Moderate temperature for schema generation
+        500 // Max tokens for schema generation
       );
 
       const extractResult = extractJSON(response.content);
@@ -614,7 +617,7 @@ if (
         ["schema_version", "entities"]
       );
 
-      for (const log of repairLogs) {
+      for (const log of repairLogs) { // Log field repairs
         await jobStore.addRepair(jobId, log);
       }
 
@@ -680,7 +683,7 @@ if (
         jobId,
         timeoutMs: APP_SPEC_STAGE_TIMEOUT_MS,
       });
-      controller.abort();
+      controller.abort(); // Abort the ongoing fetch requests
     }, APP_SPEC_STAGE_TIMEOUT_MS);
 
     try {
@@ -688,9 +691,9 @@ if (
       
       // PARTIAL CHUNKING: Metadata, Endpoints, and Flows generated separately to save tokens
       sectionMeta = await this._executeSpecSection(jobId, "meta", SPEC_PART_META_PROMPT, prompt, schemaJson, controller.signal);
-      sectionEndpoints = await this._executeSpecSection(jobId, "endpoints", SPEC_PART_ENDPOINTS_PROMPT, prompt, schemaJson, controller.signal);
-      sectionFlows = await this._executeSpecSection(jobId, "flows", SPEC_PART_FLOWS_PROMPT, prompt, schemaJson, controller.signal);
-
+      sectionEndpoints = await this._executeSpecSection(jobId, "endpoints", SPEC_PART_ENDPOINTS_PROMPT, prompt, schemaJson, controller.signal); // Max tokens 500
+      sectionFlows = await this._executeSpecSection(jobId, "flows", SPEC_PART_FLOWS_PROMPT, prompt, schemaJson, controller.signal); // Max tokens 500
+      
       const specData: Record<string, unknown> = {
         ...sectionMeta,
         ...sectionEndpoints,
@@ -717,7 +720,7 @@ if (
         ["metadata", "data_schema", "pages", "api_endpoints", "auth_rules"]
       );
 
-      for (const log of fieldRepairLogs) {
+      for (const log of fieldRepairLogs) { // Log field repairs
         await jobStore.addRepair(jobId, log);
       }
 
@@ -731,7 +734,7 @@ if (
         schema
       );
 
-      for (const log of repairLogs) {
+      for (const log of repairLogs) { // Log consistency repairs
         await jobStore.addRepair(jobId, log);
       }
 
@@ -743,6 +746,7 @@ if (
         timestamp: new Date().toISOString(),
       });
 
+      // If validation fails after initial generation and repairs, apply deterministic coercions and re-validate
       if (!validationResult.valid) {
         logger.warn("AppSpec validation failed after LLM generation; applying final deterministic fallback", {
           jobId,
@@ -769,6 +773,7 @@ if (
       await jobStore.setStageOutput(jobId, "spec", spec);
 
       await jobStore.addEvent(jobId, {
+        // Emit completion event with key metrics
         type: "stage_complete",
         stage: "spec",
         timestamp: new Date().toISOString(),
@@ -794,6 +799,7 @@ if (
         : String(error);
 
       if (timedOut) {
+        // If timeout, build and save a partial spec
         const partialSpec = this._buildPartialSpec(intent, schema, {
           ...sectionMeta,
           ...sectionEndpoints,
@@ -808,6 +814,7 @@ if (
         });
       }
 
+      // Record error and emit failed event
       await jobStore.setJobError(jobId, errorMsg);
       await jobStore.addEvent(jobId, {
         type: "stage_failed",
@@ -851,7 +858,7 @@ if (
           { role: "user", content: `Prompt:${prompt}\nSchema:${schemaJson}` },
         ],
         0.2,
-        800,
+        500, // Max tokens for each spec section
         abortSignal
       );
 
@@ -867,6 +874,7 @@ if (
         timestamp: new Date().toISOString(),
       });
 
+      // Return the extracted data for this section
       return extract.data;
     } catch (error) {
       if (abortSignal.aborted) {
@@ -878,6 +886,7 @@ if (
         jobId,
         sectionName,
         error: message,
+        timedOut: abortSignal.aborted,
       });
       await jobStore.addRepair(jobId, {
         timestamp: new Date().toISOString(),
@@ -887,6 +896,7 @@ if (
         action: "Preserved other sections and filled this section from deterministic defaults",
         outcome: "partial",
         details: { error: message },
+        timed_out: abortSignal.aborted,
       });
       await jobStore.addEvent(jobId, {
         type: "stage_retry",

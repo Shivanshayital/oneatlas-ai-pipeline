@@ -234,6 +234,7 @@ export interface RepairLog {
   action: string;
   outcome: "success" | "partial" | "failed";
   details?: Record<string, unknown>;
+  timed_out?: boolean;
 }
 
 // AI Gateway
