@@ -1,5 +1,5 @@
 import { AIProvider, TokenMetrics, ProviderUsageSummaryItem } from "../types";
-import { providerHealth } from "./gateway";
+import { getModelHealthScore, getModelHealthSnapshot, providerHealth } from "./gateway";
 
 // ============================================================================
 // Token Pricing (per 1M tokens) - as of May 2026, subject to change
@@ -84,7 +84,7 @@ export class CostTracker {
     this.totalOutputTokens += outputTokens;
     this.totalCostUsd += totalCallCost;
 
-    const providerId = model.split('/')[0] as AIProvider;
+    const providerId = resolveCostProvider(model);
     const currentUsage = this.providerUsage.get(providerId) || { inputTokens: 0, outputTokens: 0, costUsd: 0, requests: 0 };
     currentUsage.inputTokens += inputTokens;
     currentUsage.outputTokens += outputTokens;
@@ -118,7 +118,11 @@ export class CostTracker {
     const reason = providerHealth.getReason(provider);
 
     let status: ProviderUsageSummaryItem['status'] = isHealthy ? 'healthy' : 'cooldown';
-    if (usage.requests === 0 && isHealthy) status = 'active';
+    if (usage.requests > 0 && isHealthy) status = 'active';
+    const activeHealth = getModelHealthSnapshot()
+      .filter((health) => health.provider === provider)
+      .sort((a, b) => getModelHealthScore(provider, b.model) - getModelHealthScore(provider, a.model))[0];
+    const attempts = (activeHealth?.successCount ?? 0) + (activeHealth?.failureCount ?? 0);
 
     if (quotaInfo) {
       estimatedRemainingQuota = Math.max(0, quotaInfo.totalTokens - totalTokens);
@@ -140,6 +144,9 @@ export class CostTracker {
       status,
       cooldownUntil: cooldownUntil ? new Date(cooldownUntil).toISOString() : undefined,
       failureReason: reason,
+      model: activeHealth?.model,
+      healthScore: activeHealth ? getModelHealthScore(provider, activeHealth.model) : undefined,
+      successRate: attempts > 0 ? (activeHealth?.successCount ?? 0) / attempts : undefined,
       estimatedRemainingQuota,
       quotaStatus,
       failures: 0 // Tracked via retry history
@@ -153,4 +160,10 @@ export class CostTracker {
     }
     return allUsage;
   }
+}
+
+function resolveCostProvider(modelRoute: string): AIProvider {
+  const providers: AIProvider[] = ["openrouter", "openai", "groq", "gemini", "deepseek", "anthropic", "mistral"];
+  const provider = providers.find((candidate) => modelRoute.startsWith(`${candidate}/`));
+  return provider ?? "openrouter";
 }

@@ -1,4 +1,4 @@
-import { AIProvider, AIRequest, AIResponse } from "../types";
+import { AIProvider, AIRequest, AIResponse, ModelHealth } from "../types";
 import { logger } from "../logging/logger";
 
 // ============================================================================
@@ -31,6 +31,8 @@ export interface AIGateway {
   validateProvider(provider: AIProvider): boolean;
   getAvailableModels(provider: AIProvider): string[];
 }
+
+type FailureType = DetailedProviderError["type"] | "transient";
 
 // ============================================================================
 // Provider Configuration
@@ -266,11 +268,211 @@ class ProviderHealthCache {
 
 const globalHealthRef = globalThis as unknown as {
   __ONEATLAS_PROVIDER_HEALTH?: ProviderHealthCache;
+  __ONEATLAS_MODEL_HEALTH?: Map<string, ModelHealth>;
+  __ONEATLAS_OPENROUTER_MODEL_CACHE?: {
+    fetchedAt: number;
+    models: string[];
+  };
 };
 
 export const providerHealth =
   globalHealthRef.__ONEATLAS_PROVIDER_HEALTH ??
   (globalHealthRef.__ONEATLAS_PROVIDER_HEALTH = new ProviderHealthCache());
+
+export const modelHealthRegistry =
+  globalHealthRef.__ONEATLAS_MODEL_HEALTH ??
+  (globalHealthRef.__ONEATLAS_MODEL_HEALTH = new Map<string, ModelHealth>());
+
+const OPENROUTER_DISCOVERY_CACHE_MS = 5 * 60 * 1000;
+const MODEL_FAILURE_COOLDOWNS_MS: Record<FailureType, number> = {
+  quota: 60 * 60 * 1000,
+  balance: 60 * 60 * 1000,
+  rate_limit: 15 * 60 * 1000,
+  unavailable: 10 * 60 * 1000,
+  timeout: 2 * 60 * 1000,
+  context_length: 45 * 1000,
+  auth: 60 * 60 * 1000,
+  unknown: 90 * 1000,
+  transient: 30 * 1000,
+};
+
+const OPENROUTER_SEED_MODELS = [
+  "google/gemma-2-9b-it:free",
+  "mistralai/mistral-7b-instruct:free",
+  "meta-llama/llama-3.1-8b-instruct:free",
+  "google/gemini-2.0-flash-exp:free",
+  "openai/gpt-oss-20b:free",
+  "moonshotai/kimi-k2:free",
+];
+
+function modelKey(provider: AIProvider, model: string): string {
+  return `${provider}:${model}`;
+}
+
+function defaultModelHealth(provider: AIProvider, model: string): ModelHealth {
+  return {
+    provider,
+    model,
+    status: "healthy",
+    failureCount: 0,
+    successCount: 0,
+  };
+}
+
+function getMutableModelHealth(provider: AIProvider, model: string): ModelHealth {
+  const key = modelKey(provider, model);
+  const existing = modelHealthRegistry.get(key);
+  if (existing) {
+    if (existing.cooldownUntil && Date.now() >= existing.cooldownUntil) {
+      existing.status = existing.failureCount >= 5 && existing.successCount === 0 ? "failed" : "healthy";
+      existing.cooldownUntil = undefined;
+    }
+    return existing;
+  }
+
+  const created = defaultModelHealth(provider, model);
+  modelHealthRegistry.set(key, created);
+  return created;
+}
+
+export function getModelHealth(provider: AIProvider, model: string): ModelHealth {
+  return { ...getMutableModelHealth(provider, model) };
+}
+
+export function getModelHealthSnapshot(): ModelHealth[] {
+  for (const health of modelHealthRegistry.values()) {
+    getMutableModelHealth(health.provider, health.model);
+  }
+  return Array.from(modelHealthRegistry.values()).map((health) => ({ ...health }));
+}
+
+export function getModelHealthScore(provider: AIProvider, model: string): number {
+  const health = getMutableModelHealth(provider, model);
+  if (health.status === "cooldown" || health.status === "failed") return 0;
+
+  const attempts = health.successCount + health.failureCount;
+  const successRate = attempts > 0 ? health.successCount / attempts : 0.72;
+  const latencyPenalty = health.averageLatency ? Math.min(0.35, health.averageLatency / 20000) : 0.08;
+  const recencyBoost = health.lastSuccess ? Math.max(0, 0.1 - (Date.now() - health.lastSuccess) / 3_600_000) : 0;
+  return Math.max(0.05, Math.min(1, successRate - latencyPenalty + recencyBoost));
+}
+
+function classifyFailure(error: unknown): FailureType {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  if (message.includes("quota") || message.includes("billing")) return "quota";
+  if (message.includes("balance") || message.includes("credit")) return "balance";
+  if (message.includes("429") || message.includes("rate_limit") || message.includes("rate limit") || message.includes("provider returned error")) return "rate_limit";
+  if (message.includes("no endpoints found") || message.includes("unavailable") || message.includes("model not found") || message.includes("404")) return "unavailable";
+  if (message.includes("context_length") || message.includes("too many tokens")) return "context_length";
+  if (message.includes("401") || message.includes("403") || message.includes("auth")) return "auth";
+  if (message.includes("timeout") || message.includes("abort")) return "timeout";
+  return "transient";
+}
+
+function isProviderWideFailure(type: FailureType): boolean {
+  return type === "quota" || type === "balance" || type === "auth" || type === "rate_limit";
+}
+
+export function markModelSuccess(provider: AIProvider, model: string, latencyMs: number): void {
+  const health = getMutableModelHealth(provider, model);
+  health.status = "healthy";
+  health.lastSuccess = Date.now();
+  health.successCount += 1;
+  health.cooldownUntil = undefined;
+  health.averageLatency =
+    health.averageLatency === undefined
+      ? latencyMs
+      : Math.round(health.averageLatency * 0.7 + latencyMs * 0.3);
+
+  logger.info("Model success recorded", {
+    provider,
+    model,
+    latencyMs,
+    healthScore: getModelHealthScore(provider, model),
+  });
+}
+
+export function markModelFailure(provider: AIProvider, model: string, error: unknown): FailureType {
+  const type = classifyFailure(error);
+  const health = getMutableModelHealth(provider, model);
+  const cooldownMs = MODEL_FAILURE_COOLDOWNS_MS[type];
+
+  health.status = health.failureCount >= 4 && health.successCount === 0 ? "failed" : "cooldown";
+  health.lastFailure = Date.now();
+  health.failureCount += 1;
+  health.cooldownUntil = Date.now() + cooldownMs;
+
+  logger.warn("Model cooldown start", {
+    provider,
+    model,
+    failureType: type,
+    cooldownMs,
+    error: error instanceof Error ? error.message : String(error),
+  });
+
+  if (isProviderWideFailure(type)) {
+    providerHealth.markFailure(provider, error);
+  }
+
+  return type;
+}
+
+export async function getHealthyOpenRouterModels(): Promise<string[]> {
+  const cached = globalHealthRef.__ONEATLAS_OPENROUTER_MODEL_CACHE;
+  const now = Date.now();
+  let discovered = cached && now - cached.fetchedAt < OPENROUTER_DISCOVERY_CACHE_MS
+    ? cached.models
+    : OPENROUTER_SEED_MODELS;
+
+  if (!cached || now - cached.fetchedAt >= OPENROUTER_DISCOVERY_CACHE_MS) {
+    try {
+      const response = await fetch("https://openrouter.ai/api/v1/models", {
+        headers: process.env.OPENROUTER_API_KEY
+          ? { Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}` }
+          : undefined,
+      });
+
+      if (response.ok) {
+        const payload = (await response.json()) as {
+          data?: Array<{
+            id?: string;
+            pricing?: { prompt?: string; completion?: string };
+          }>;
+        };
+        const freeModels =
+          payload.data
+            ?.filter((model) => {
+              const promptPrice = Number(model.pricing?.prompt ?? "1");
+              const completionPrice = Number(model.pricing?.completion ?? "1");
+              return Boolean(model.id) && promptPrice === 0 && completionPrice === 0;
+            })
+            .map((model) => model.id as string) ?? [];
+
+        discovered = uniqueModels([...freeModels, ...OPENROUTER_SEED_MODELS]);
+        globalHealthRef.__ONEATLAS_OPENROUTER_MODEL_CACHE = {
+          fetchedAt: now,
+          models: discovered,
+        };
+      }
+    } catch (error) {
+      logger.warn("OpenRouter model discovery failed; using cached seed models", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const healthyModels = discovered
+    .filter((model) => {
+      const health = getMutableModelHealth("openrouter", model);
+      return health.status === "healthy";
+    })
+    .sort((a, b) => getModelHealthScore("openrouter", b) - getModelHealthScore("openrouter", a));
+
+  return healthyModels.length > 0 ? healthyModels : OPENROUTER_SEED_MODELS.filter((model) => {
+    const health = getMutableModelHealth("openrouter", model);
+    return !health.cooldownUntil || Date.now() >= health.cooldownUntil;
+  });
+}
 
 // ============================================================================
 // OpenAI Provider
@@ -827,12 +1029,7 @@ export class MultiProviderGateway implements AIGateway {
     }
     if (provider === "openrouter") {
       return [
-        "openai/gpt-oss-20b:free", // Example OpenRouter model
-        "moonshotai/kimi-k2:free", // Example OpenRouter model
-        "google/gemini-2.0-flash-exp:free", // Example OpenRouter model
-        "deepseek/deepseek-chat",
-        "meta-llama/llama-3.3-70b-instruct",
-        "openai/gpt-4o-mini",
+        ...OPENROUTER_SEED_MODELS,
       ];
     }
     return [];
@@ -973,104 +1170,68 @@ export class AIGatewayWithFallback implements AIGateway {
   }
 
   async send(request: AIRequest): Promise<AIResponse> {
-    const attemptedProviders = new Set<AIProvider>();
+    const attemptedRoutes = new Set<string>();
     const unavailableReasons: string[] = [];
+    const routes = await this._buildCandidateRoutes(request);
+    let lastError: Error | null = null;
 
-    // If the requested provider is available, try it first
-    if (
-      this.gateway.validateProvider(request.provider) &&
-      providerHealth.isHealthy(request.provider)
-    ) {
-      if (this.isMockGateway()) {
-        // If it's a mock gateway, just send the request directly without fallback logic
-        return this.gateway.send(request);
-      }
-
-      try {
-        attemptedProviders.add(request.provider);
-        const response = await this.gateway.send(request);
-        return response;
-      } catch (err) {
-        providerHealth.markFailure(request.provider, err);
-        this._logProviderFailureOnce(
-          request.provider,
-          `Provider ${request.provider} failed; routing to fallback`,
-          err
-        );
-        // fallthrough to fallback selection
-      }
-    } else if (!this.gateway.validateProvider(request.provider)) {
-      unavailableReasons.push(`${request.provider}: not configured`);
-      console.warn(`Provider ${request.provider} not configured, selecting fallback`);
-    } else {
-      unavailableReasons.push(
-        `${request.provider}: ${providerHealth.getReason(request.provider) ?? "health cooldown"}`
-      );
-      this._logProviderSkipOnce(request.provider);
+    if (this.isMockGateway()) {
+      return this.gateway.send(request);
     }
 
-    // consolidated fallback order: OpenRouter only as per requirement
-    const fallbackOrder: AIProvider[] = ["openrouter"];
+    for (let attempt = 0; attempt < routes.length; attempt += 1) {
+      const route = routes[attempt];
+      const key = modelKey(route.provider, route.model);
+      if (attemptedRoutes.has(key)) continue;
+      attemptedRoutes.add(key);
 
-    // Default model mapping per provider (safe fallbacks)
-    const DEFAULT_MODEL: Record<AIProvider, string> = {
-      gemini: "",
-      deepseek: "",
-      groq: "",
-      openai: "",
-      anthropic: "",
-      mistral: "",
-      openrouter: "google/gemma-2-9b-it:free", // Primary OpenRouter fallback model
-    };
-
-    let lastError: Error | null = null;
-    for (const candidate of fallbackOrder) {
-      if (attemptedProviders.has(candidate)) continue;
-      if (!this.gateway.validateProvider(candidate)) {
-        unavailableReasons.push(`${candidate}: not configured`);
+      if (!this.gateway.validateProvider(route.provider)) {
+        unavailableReasons.push(`${route.provider}: not configured`);
         continue;
       }
-      if (!providerHealth.isHealthy(candidate)) {
+      if (!providerHealth.isHealthy(route.provider)) {
         unavailableReasons.push(
-          `${candidate}: ${providerHealth.getReason(candidate) ?? "health cooldown"}`
+          `${route.provider}: ${providerHealth.getReason(route.provider) ?? "health cooldown"}`
         );
-        this._logProviderSkipOnce(candidate);
+        this._logProviderSkipOnce(route.provider);
         continue;
       }
-      
-      // Use the specific model from MODEL_ROUTING if available for the candidate provider,
-      // otherwise fall back to the default model for that provider, then to the request model.
-      // The model routing is handled by PipelineExecutor. Here, we just try the default model for the fallback provider.
-      const chosenModel = DEFAULT_MODEL[candidate] || request.model;
+      if (getModelHealthScore(route.provider, route.model) <= 0) {
+        unavailableReasons.push(`${route.provider}/${route.model}: model cooldown`);
+        continue;
+      }
+
       try {
         const fallbackRequest: AIRequest = {
           ...request,
-          provider: candidate,
-          model: chosenModel,
+          provider: route.provider,
+          model: route.model,
         };
-        if (candidate !== request.provider) {
-          logger.info(`Routing request to fallback provider ${candidate}/${chosenModel}`);
-        }
-        return await this.gateway.send(fallbackRequest);
+        logger.info("Provider route attempt", {
+          stage: request.stage,
+          attempt: attempt + 1,
+          provider: route.provider,
+          model: route.model,
+          healthScore: getModelHealthScore(route.provider, route.model),
+          requestedProvider: request.provider,
+          requestedModel: request.model,
+        });
+        const response = await this.gateway.send(fallbackRequest);
+        markModelSuccess(response.provider, response.model, response.latency_ms);
+        return response;
       } catch (err) {
-        providerHealth.markFailure(candidate, err);
         lastError = err as Error;
-        
-        const errorStr = String(err).toLowerCase();
-        const isUnavailable = errorStr.includes("unavailable") || 
-                             errorStr.includes("no endpoints found") ||
-                             errorStr.includes("provider returned error") ||
-                             errorStr.includes("rate_limit");
+        const failureType = markModelFailure(route.provider, route.model, err);
 
-        if (isUnavailable) {
-          logger.warn(`[Gateway] Skipped unavailable model ${candidate}/${chosenModel}: ${errorStr}`);
-        }
-
-        this._logProviderFailureOnce(
-          candidate,
-          `${isUnavailable ? 'Skipped unavailable model' : 'Fallback provider failure'}: ${candidate} failed; trying next provider`,
-          err
-        );
+        logger.warn("Provider route failed; trying next healthy route", {
+          stage: request.stage,
+          provider: route.provider,
+          model: route.model,
+          failureType,
+          attempt: attempt + 1,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await sleep(backoffMs(attempt));
       }
     }
 
@@ -1085,18 +1246,61 @@ export class AIGatewayWithFallback implements AIGateway {
     return this.gateway.getAvailableModels(provider);
   }
 
-  private _logProviderFailureOnce(
-    provider: AIProvider,
-    message: string,
-    error: unknown
-  ): void {
-    if (!providerHealth.shouldLog(provider)) return;
-    console.warn(message, error);
-  }
-
   private _logProviderSkipOnce(provider: AIProvider): void {
     if (!providerHealth.shouldLog(provider)) return;
     const reason = providerHealth.getReason(provider) ?? "temporary provider health cooldown";
     console.info(`Skipping unhealthy provider ${provider}: ${reason}`);
   }
+
+  private async _buildCandidateRoutes(request: AIRequest): Promise<Array<{ provider: AIProvider; model: string }>> {
+    const providers: AIProvider[] = uniqueProviders([
+      request.provider,
+      "openrouter",
+      "groq",
+      "gemini",
+      "deepseek",
+    ]);
+
+    const routes: Array<{ provider: AIProvider; model: string }> = [];
+    for (const provider of providers) {
+      if (!this.gateway.validateProvider(provider)) continue;
+      if (provider === "openrouter") {
+        const models = await getHealthyOpenRouterModels();
+        const openRouterModels = request.provider === "openrouter"
+          ? uniqueModels([request.model, ...models])
+          : models;
+        routes.push(...openRouterModels.map((model) => ({ provider, model })));
+        continue;
+      }
+
+      const defaults = this._defaultModels(provider);
+      const models = request.provider === provider
+        ? uniqueModels([request.model, ...defaults])
+        : defaults;
+      routes.push(...models.map((model) => ({ provider, model })));
+    }
+
+    return routes.sort((a, b) => getModelHealthScore(b.provider, b.model) - getModelHealthScore(a.provider, a.model));
+  }
+
+  private _defaultModels(provider: AIProvider): string[] {
+    if (provider === "groq") return ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
+    if (provider === "gemini") return ["gemini-2.0-flash", "gemini-1.5-flash"];
+    if (provider === "deepseek") return ["deepseek-chat"];
+    if (provider === "openai") return ["gpt-4o-mini"];
+    return [];
+  }
+}
+
+function uniqueProviders(providers: AIProvider[]): AIProvider[] {
+  return Array.from(new Set(providers));
+}
+
+function backoffMs(attempt: number): number {
+  const base = Math.min(2500, 200 * 2 ** attempt);
+  return base + Math.floor(Math.random() * 250);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

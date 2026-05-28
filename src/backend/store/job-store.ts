@@ -12,6 +12,7 @@ import {
   AIProvider,
 } from "../types";
 import { logger } from "../logging/logger";
+import { getModelHealthScore, getModelHealthSnapshot, providerHealth } from "../ai/gateway";
 
 // ============================================================================
 // Job Store - In-Memory State Management
@@ -245,10 +246,18 @@ export class JobStore {
       const estimatedRemainingQuota = quota
         ? Math.max(0, quota - totalTokens)
         : 0;
+      const model = providerHistory.at(-1)?.model;
+      const providerModels = getModelHealthSnapshot().filter((health) => health.provider === provider);
+      const activeHealth = model
+        ? providerModels.find((health) => health.model === model)
+        : providerModels.sort((a, b) => getModelHealthScore(provider, b.model) - getModelHealthScore(provider, a.model))[0];
+      const cooldownUntil = providerHealth.getCooldownUntil(provider) ?? activeHealth?.cooldownUntil;
+      const healthScore = activeHealth ? getModelHealthScore(provider, activeHealth.model) : undefined;
+      const attempts = (activeHealth?.successCount ?? 0) + (activeHealth?.failureCount ?? 0);
 
       summary[provider] = {
         provider,
-        model: providerHistory.at(-1)?.model,
+        model: model ?? activeHealth?.model,
         requests,
         promptTokens: inputTokens,
         completionTokens: outputTokens,
@@ -256,13 +265,21 @@ export class JobStore {
         estimatedCost,
         latencyMs: requests > 0 ? latencyTotal / requests : 0,
         status:
-          requests > 0
-            ? "active"
-            : failures > 0
+          cooldownUntil
+            ? "cooldown"
+            : activeHealth?.status === "failed"
               ? "failed"
-              : configuredProviders.includes(provider)
-                ? "healthy"
-                : "inactive",
+              : requests > 0
+                ? "active"
+                : failures > 0
+                  ? "failed"
+                  : configuredProviders.includes(provider)
+                    ? "healthy"
+                    : "inactive",
+        cooldownUntil: cooldownUntil ? new Date(cooldownUntil).toISOString() : undefined,
+        failureReason: providerHealth.getReason(provider),
+        healthScore,
+        successRate: attempts > 0 ? (activeHealth?.successCount ?? 0) / attempts : undefined,
         estimatedRemainingQuota,
         quotaStatus: quota ? quotaStatus(totalTokens, quota) : "unknown",
         failures,
@@ -279,7 +296,6 @@ export class JobStore {
   getValidationSnapshots(id: string): ValidationSnapshot[] {
     return this.jobs.get(id)?.validation_snapshots ?? [];
   }
-
   addEventListener(
     id: string,
     listener: (event: StageEvent) => void

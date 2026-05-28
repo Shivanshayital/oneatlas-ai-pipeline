@@ -12,7 +12,7 @@ import {
   PipelineMetrics, // Keep PipelineMetrics
   PipelineStage,
 } from "../types/index";
-import { AIGateway, MODEL_ROUTING } from "../ai/gateway";
+import { AIGateway, MODEL_ROUTING, getModelHealthScore, resolveProviderAndModel } from "../ai/gateway";
 import { validationEngine } from "../validation/engine";
 
 import { repairEngine } from "../repair/engine";
@@ -36,55 +36,6 @@ import {
 // ============================================================================
 // System Prompts for Each Stage
 // ============================================================================
-function resolveProviderAndModel(
-  route: string
-): {
-  provider: AIProvider;
-  model: string;
-} {
-  // OpenRouter-hosted models
-  if (
-    route.startsWith("meta-llama/") ||
-    route.startsWith("google/") ||
-    route.startsWith("mistralai/") ||
-    route.includes(":free")
-  ) {
-    return {
-      provider: "openrouter",
-      model: route,
-    };
-  }
-
-  // Native Groq models
-  if (route.startsWith("groq/")) {
-    return {
-      provider: "groq",
-      model: route.replace("groq/", ""),
-    };
-  }
-
-  // Native DeepSeek models
-  if (route.startsWith("deepseek/")) {
-    return {
-      provider: "deepseek",
-      model: route.replace("deepseek/", ""),
-    };
-  }
-
-  // Native Gemini models
-  if (route.startsWith("gemini/")) {
-    return {
-      provider: "gemini",
-      model: route.replace("gemini/", ""),
-    };
-  }
-
-  // Fallback
-  return {
-    provider: "openrouter",
-    model: route,
-  };
-}
 const COMPACT_MODE = "Return minified JSON only. No markdown. No explanations.";
 
 const INTENT_EXTRACTION_PROMPT = `Extract app intent. ${COMPACT_MODE}
@@ -210,7 +161,9 @@ export class PipelineExecutor {
       cost_usd: cost,
       attempt,
       timestamp: new Date().toISOString(),
-      health_status: "healthy", // Injected for dashboard observability
+      health_status: "active" as const,
+      health_score: getModelHealthScore(provider, model),
+      retry_count: Math.max(0, attempt - 1),
     };
 
     jobStore.addProviderUsage(jobId, providerUsage);
@@ -427,8 +380,7 @@ const routes = [
         stage: "intent",
         timestamp: new Date().toISOString(),
         data: {
-          provider: modelRoutingConfig.primary.split("/")[0] as AIProvider,
-          model: modelRoutingConfig.primary.split("/")[1],
+          ...resolveProviderAndModel(modelRoutingConfig.primary),
         },
       });
 
@@ -534,8 +486,7 @@ const routes = [
         stage: "schema",
         timestamp: new Date().toISOString(),
         data: {
-          provider: modelRoutingConfig.primary.split("/")[0] as AIProvider,
-          model: modelRoutingConfig.primary.split("/")[1],
+          ...resolveProviderAndModel(modelRoutingConfig.primary),
         },
       });
 
@@ -689,9 +640,6 @@ if (
     const stageStartTime = Date.now();
 
     try {
-      const primaryRoute = MODEL_ROUTING.spec.primary;
-      const [_primaryProvider, _primaryModel] = primaryRoute.split("/") as [AIProvider, string];
-
       const schemaJson = JSON.stringify(schema, null, 2);
       
       // PARTIAL CHUNKING: Metadata, Endpoints, and Flows generated separately to save tokens
@@ -730,6 +678,7 @@ if (
       }
 
       this._ensureMinimumSpec(fieldRepairedSpec, intent, schema);
+      this._coerceSpecCollections(fieldRepairedSpec, intent, schema);
 
       // Repair consistency
       const { data: repairedSpec, logs: repairLogs } = repairEngine.repairConsistency(
@@ -751,9 +700,24 @@ if (
       });
 
       if (!validationResult.valid) {
-        throw new Error(
-          `AppSpec validation failed: ${JSON.stringify(validationResult.errors)}`
-        );
+        logger.warn("AppSpec validation failed after LLM generation; applying final deterministic fallback", {
+          jobId,
+          errors: validationResult.errors,
+        });
+        this._coerceSpecCollections(repairedSpec, intent, schema);
+        this._ensureMinimumSpec(repairedSpec, intent, schema);
+        const secondPass = validationEngine.validateAppSpec(repairedSpec);
+        jobStore.addValidationSnapshot(jobId, {
+          stage: "spec",
+          valid: secondPass.valid,
+          errors: secondPass.errors,
+          timestamp: new Date().toISOString(),
+        });
+        if (!secondPass.valid) {
+          throw new Error(
+            `AppSpec validation failed: ${JSON.stringify(secondPass.errors)}`
+          );
+        }
       }
 
       const spec = AppSpecSchema.parse(repairedSpec) as AppSpec;
@@ -792,20 +756,60 @@ if (
     prompt: string, 
     schemaJson: string
   ): Promise<Record<string, unknown>> { // Changed from any
-    const response = await this._sendWithRetry(
-      jobId,
-      "spec",
-      [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: `Context: ${prompt}\nSchema: ${schemaJson}` },
-      ],
-      0.3,
-      1000 // Cap spec chunks to reduce load
-    );
+    try {
+      const response = await this._sendWithRetry(
+        jobId,
+        "spec",
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Prompt:${prompt}\nSchema:${schemaJson}` },
+        ],
+        0.2,
+        800
+      );
 
-    const extract = extractJSON(response.content);
-    if (!extract.success || !extract.data) throw new Error(`Spec ${sectionName} extraction failed`);
-    return extract.data as Record<string, unknown>; // Cast to unknown
+      const extract = extractJSON<Record<string, unknown>>(response.content);
+      if (!extract.success || !extract.data || typeof extract.data !== "object") {
+        throw new Error(`Spec ${sectionName} extraction failed: ${extract.error ?? "invalid JSON"}`);
+      }
+
+      jobStore.addValidationSnapshot(jobId, {
+        stage: "spec",
+        valid: true,
+        errors: [],
+        timestamp: new Date().toISOString(),
+      });
+
+      return extract.data;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn("Spec section generation degraded", {
+        jobId,
+        sectionName,
+        error: message,
+      });
+      jobStore.addRepair(jobId, {
+        timestamp: new Date().toISOString(),
+        stage: "spec",
+        strategy: "structural_repair",
+        error: `Spec section ${sectionName} failed`,
+        action: "Preserved other sections and filled this section from deterministic defaults",
+        outcome: "partial",
+        details: { error: message },
+      });
+      jobStore.addEvent(jobId, {
+        type: "stage_retry",
+        stage: "spec",
+        timestamp: new Date().toISOString(),
+        data: {
+          section: sectionName,
+          degraded: true,
+        },
+        error: message,
+        is_degraded: true,
+      });
+      return {};
+    }
   }
 
   private _ensureMinimumSpec( // Explicit return type
@@ -881,6 +885,96 @@ if (
       schema,
       specData.integration_hooks as Array<Record<string, unknown>>
     );
+  }
+
+  private _coerceSpecCollections(
+    specData: Record<string, unknown>,
+    intent: AppIntent,
+    schema: DataSchema
+  ): void {
+    const primaryEntity = schema.entities[0]?.name ?? "Task";
+    const primaryTable = schema.entities[0]?.tableName ?? "tasks";
+
+    const rawPages = Array.isArray(specData.pages) ? specData.pages : [];
+    const pages = rawPages
+      .filter((page): page is Record<string, unknown> => Boolean(page) && typeof page === "object")
+      .map((page, index) => {
+        const name = safeSlug(String(page.name ?? page.title ?? (index === 0 ? "dashboard" : primaryEntity)));
+        return {
+          name,
+          path: normalizePath(String(page.path ?? (index === 0 ? "/" : `/${name}`))),
+          title: nonEmptyString(page.title, `${titleCase(name)} | ${intent.appName}`),
+          description: typeof page.description === "string" ? page.description : undefined,
+          requires_auth: typeof page.requires_auth === "boolean" ? page.requires_auth : true,
+          components: normalizeStringArray(page.components, [`${name}-view`]),
+        };
+      });
+    specData.pages = pages.length > 0
+      ? pages
+      : [
+          {
+            name: "dashboard",
+            path: "/",
+            title: `${intent.appName} Dashboard`,
+            requires_auth: true,
+            components: ["dashboard-view"],
+          },
+        ];
+
+    const entityNames = new Set(schema.entities.map((entity) => entity.name));
+    const rawEndpoints = Array.isArray(specData.api_endpoints) ? specData.api_endpoints : [];
+    const endpoints = rawEndpoints
+      .filter((endpoint): endpoint is Record<string, unknown> => Boolean(endpoint) && typeof endpoint === "object")
+      .map((endpoint) => {
+        const entity = entityNames.has(String(endpoint.entity)) ? String(endpoint.entity) : primaryEntity;
+        const method = normalizeMethod(endpoint.method);
+        return {
+          path: normalizePath(String(endpoint.path ?? `/api/${primaryTable}`)),
+          method,
+          entity,
+          auth_required: typeof endpoint.auth_required === "boolean" ? endpoint.auth_required : true,
+          parameters: isStringRecord(endpoint.parameters) ? endpoint.parameters : undefined,
+          response_type: nonEmptyString(endpoint.response_type, "json"),
+        };
+      });
+    specData.api_endpoints = endpoints.length > 0
+      ? endpoints
+      : schema.entities.map((entity) => ({
+          path: `/api/${entity.tableName}`,
+          method: "GET" as const,
+          entity: entity.name,
+          auth_required: true,
+          response_type: "json",
+        }));
+
+    const rawAuthRules = Array.isArray(specData.auth_rules) ? specData.auth_rules : [];
+    specData.auth_rules = rawAuthRules
+      .filter((rule): rule is Record<string, unknown> => Boolean(rule) && typeof rule === "object")
+      .map((rule) => ({
+        resource: nonEmptyString(rule.resource, primaryEntity),
+        actions: normalizeStringArray(rule.actions, ["read", "create", "update", "delete"]),
+        roles: normalizeStringArray(rule.roles, ["admin", "member"]),
+        conditions: rule.conditions && typeof rule.conditions === "object"
+          ? (rule.conditions as Record<string, unknown>)
+          : undefined,
+      }));
+
+    const rawHooks = Array.isArray(specData.integration_hooks) ? specData.integration_hooks : [];
+    specData.integration_hooks = rawHooks.filter(
+      (hook): hook is Record<string, unknown> => Boolean(hook) && typeof hook === "object"
+    );
+
+    const rawWorkflows = Array.isArray(specData.workflows) ? specData.workflows : [];
+    specData.workflows = rawWorkflows
+      .filter((workflow): workflow is Record<string, unknown> => Boolean(workflow) && typeof workflow === "object")
+      .map((workflow) => ({
+        name: nonEmptyString(workflow.name, `${primaryEntity} Workflow`),
+        trigger_type: normalizeTriggerType(workflow.trigger_type),
+        trigger_entity: entityNames.has(String(workflow.trigger_entity)) ? String(workflow.trigger_entity) : primaryEntity,
+        steps: normalizeWorkflowSteps(workflow.steps),
+      }));
+
+    specData.assumptions = normalizeStringArray(specData.assumptions, []);
   }
 
   private _normalizeAppType(prompt: string, rawType: string): AppIntent["appType"] { // Explicit return type
@@ -1038,4 +1132,68 @@ if (
       .replace(/\b\w/g, (char) => char.toUpperCase());
   }
 
+}
+
+function nonEmptyString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function normalizeStringArray(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return fallback;
+  const normalized = value
+    .map((item) => String(item ?? "").trim())
+    .filter((item) => item.length > 0);
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+function normalizePath(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "/") return "/";
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+function normalizeMethod(value: unknown): "GET" | "POST" | "PUT" | "DELETE" | "PATCH" {
+  const method = String(value ?? "GET").toUpperCase();
+  if (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH") {
+    return method;
+  }
+  return "GET";
+}
+
+function normalizeTriggerType(value: unknown): "event" | "schedule" | "manual" {
+  if (value === "schedule" || value === "manual") return value;
+  return "event";
+}
+
+function normalizeWorkflowSteps(value: unknown): Array<{ action: string; integration_id?: string; entity_mapping?: Record<string, string> }> {
+  if (!Array.isArray(value)) return [{ action: "notify" }];
+  const steps = value
+    .filter((step): step is Record<string, unknown> => Boolean(step) && typeof step === "object")
+    .map((step) => ({
+      action: nonEmptyString(step.action, "notify"),
+      integration_id: typeof step.integration_id === "string" ? step.integration_id : undefined,
+      entity_mapping: isStringRecord(step.entity_mapping) ? step.entity_mapping : undefined,
+    }));
+  return steps.length > 0 ? steps : [{ action: "notify" }];
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return Boolean(value) &&
+    typeof value === "object" &&
+    Object.values(value as Record<string, unknown>).every((entry) => typeof entry === "string");
+}
+
+function safeSlug(value: string): string {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return slug || "page";
+}
+
+function titleCase(value: string): string {
+  return value
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }

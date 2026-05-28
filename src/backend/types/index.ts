@@ -153,7 +153,24 @@ export interface ProviderUsage {
   cost_usd: number;
   attempt: number;
   timestamp: string;
+  health_status?: "healthy" | "active" | "cooldown" | "failed" | "unavailable";
+  health_score?: number;
+  retry_count?: number;
 }
+
+export type ModelHealthStatus = "healthy" | "cooldown" | "failed";
+
+export type ModelHealth = {
+  model: string;
+  provider: AIProvider;
+  status: ModelHealthStatus;
+  lastSuccess?: number;
+  lastFailure?: number;
+  failureCount: number;
+  successCount: number;
+  cooldownUntil?: number;
+  averageLatency?: number;
+};
 
 export interface RetryEntry {
   stage: PipelineStage;
@@ -310,6 +327,8 @@ export interface ProviderUsageSummaryItem {
   status: "healthy" | "active" | "inactive" | "cooldown" | "failed";
   cooldownUntil?: string;
   failureReason?: string;
+  healthScore?: number;
+  successRate?: number;
   estimatedRemainingQuota: number;
   quotaStatus: 'low' | 'medium' | 'high' | 'near_limit' | 'unknown';
   failures: number;

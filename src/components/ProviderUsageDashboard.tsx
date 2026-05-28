@@ -33,7 +33,7 @@ const ProviderUsageDashboard: React.FC<ProviderUsageDashboardProps> = ({
     currentSessionUsage.set(usage.provider, current);
   });
 
-  const allProviders: AIProvider[] = ["gemini", "deepseek", "groq", "openai"]; // Order of display
+  const allProviders: AIProvider[] = ["openrouter", "gemini", "deepseek", "groq", "openai"];
 
   return (
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-950">
@@ -56,6 +56,12 @@ const ProviderUsageDashboard: React.FC<ProviderUsageDashboardProps> = ({
             "N/A";
           const displayQuotaStatus = summary?.quotaStatus ?? "unknown";
           const displayRemainingQuota = summary?.estimatedRemainingQuota ?? 0;
+          const displayHealthScore = summary?.healthScore;
+          const displaySuccessRate = summary?.successRate;
+          const displayFailures = sessionUsage?.failures ?? summary?.failures ?? 0;
+          const cooldownMs = summary?.cooldownUntil
+            ? Math.max(0, new Date(summary.cooldownUntil).getTime() - Date.now())
+            : 0;
 
           const getQuotaBadgeColor = (status: typeof displayQuotaStatus): string => {
             switch (status) {
@@ -80,6 +86,10 @@ const ProviderUsageDashboard: React.FC<ProviderUsageDashboardProps> = ({
                   className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
                     displayStatus === "active"
                       ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+                      : displayStatus === "healthy"
+                      ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                      : displayStatus === "cooldown"
+                      ? "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200"
                       : displayStatus === "failed"
                       ? "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200"
                       : "bg-slate-100 text-slate-800 dark:bg-slate-700 dark:text-slate-300"
@@ -110,6 +120,25 @@ const ProviderUsageDashboard: React.FC<ProviderUsageDashboardProps> = ({
                 <p>
                   Latency (avg): <span className="font-medium">{displayLatency.toFixed(1)}ms</span>
                 </p>
+                <p>
+                  Health Score: <span className="font-medium">{displayHealthScore === undefined ? "N/A" : `${Math.round(displayHealthScore * 100)}%`}</span>
+                </p>
+                <p>
+                  Success Rate: <span className="font-medium">{displaySuccessRate === undefined ? "N/A" : `${Math.round(displaySuccessRate * 100)}%`}</span>
+                </p>
+                <p>
+                  Retries/Failures: <span className="font-medium">{displayFailures}</span>
+                </p>
+                {summary?.cooldownUntil && (
+                  <p>
+                    Cooldown: <span className="font-medium">{Math.ceil(cooldownMs / 1000)}s</span>
+                  </p>
+                )}
+                {summary?.failureReason && (
+                  <p className="break-words text-xs text-red-600 dark:text-red-300">
+                    {summary.failureReason}
+                  </p>
+                )}
                 {displayQuotaStatus !== 'unknown' && (
                   <div className="flex items-center gap-2">
                     <p>Quota Status:</p>
