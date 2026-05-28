@@ -404,6 +404,12 @@ const routes = [
 
       const intentSource = extractResult.data as Record<string, unknown>;
       intentSource.appType = this._normalizeAppType(prompt, String(intentSource.appType ?? ""));
+      const intentRepair = repairIntentData(intentSource, prompt);
+      Object.assign(intentSource, intentRepair.data);
+
+      for (const log of intentRepair.logs) {
+        jobStore.addRepair(jobId, log);
+      }
 
       // Apply repairs
       const requiredFields = [
@@ -1196,4 +1202,110 @@ function titleCase(value: string): string {
   return value
     .replace(/[-_]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+export function repairIntentData(
+  intent: Record<string, unknown>,
+  prompt: string
+): { data: Record<string, unknown>; logs: import("../types").RepairLog[] } {
+  const repaired = { ...intent };
+  const logs: import("../types").RepairLog[] = [];
+  const promptText = prompt.toLowerCase();
+
+  const inferredFeatures = normalizeStringArray(repaired.features, []);
+  const inferredEntities = normalizeStringArray(repaired.entities, []);
+
+  if (inferredFeatures.length === 0) {
+    const features = inferIntentFeatures(promptText);
+    repaired.features = features.length > 0 ? features : ["Basic CRUD"];
+    logs.push(createIntentRepairLog(
+      "Empty intent features",
+      features.length > 0
+        ? `Inferred features from prompt: ${features.join(", ")}`
+        : "Applied validation-safe fallback feature",
+      features.length > 0 ? "success" : "partial",
+      { inferred_features: repaired.features }
+    ));
+  } else {
+    repaired.features = inferredFeatures;
+  }
+
+  if (inferredEntities.length === 0) {
+    const entities = inferIntentEntities(promptText);
+    repaired.entities = entities.length > 0 ? entities : ["Item"];
+    logs.push(createIntentRepairLog(
+      "Empty intent entities",
+      entities.length > 0
+        ? `Inferred entities from prompt: ${entities.join(", ")}`
+        : "Applied validation-safe fallback entity",
+      entities.length > 0 ? "success" : "partial",
+      { inferred_entities: repaired.entities }
+    ));
+  } else {
+    repaired.entities = inferredEntities;
+  }
+
+  if (!Array.isArray(repaired.integrations_requested)) {
+    repaired.integrations_requested = [];
+  }
+  if (!Array.isArray(repaired.assumptions)) {
+    repaired.assumptions = [];
+  }
+
+  return { data: repaired, logs };
+}
+
+function inferIntentEntities(promptText: string): string[] {
+  const entities = new Set<string>();
+
+  if (/\b(todo|todos|task|tasks)\b/.test(promptText)) entities.add("Todo");
+  if (/\b(note|notes|memo|memos)\b/.test(promptText)) entities.add("Note");
+  if (/\b(auth|login|signup|sign up|user|users|account|accounts)\b/.test(promptText)) entities.add("User");
+  if (/\b(ecommerce|commerce|shop|store|product|products|order|orders|cart|checkout)\b/.test(promptText)) {
+    entities.add("Product");
+    entities.add("Order");
+  }
+  if (/\b(chat|message|messages|conversation|conversations)\b/.test(promptText)) {
+    entities.add("Message");
+    entities.add("User");
+  }
+
+  return Array.from(entities);
+}
+
+function inferIntentFeatures(promptText: string): string[] {
+  if (/\b(todo|todos|task|tasks)\b/.test(promptText)) {
+    return ["Create todos", "Update todos", "Delete todos"];
+  }
+  if (/\b(note|notes|memo|memos)\b/.test(promptText)) {
+    return ["Create notes", "Update notes", "Delete notes"];
+  }
+  if (/\b(ecommerce|commerce|shop|store|product|products|order|orders|cart|checkout)\b/.test(promptText)) {
+    return ["Browse products", "Manage orders", "Checkout"];
+  }
+  if (/\b(chat|message|messages|conversation|conversations)\b/.test(promptText)) {
+    return ["Send messages", "View conversations", "Manage users"];
+  }
+  if (/\b(auth|login|signup|sign up|user|users|account|accounts)\b/.test(promptText)) {
+    return ["User registration", "User login", "Manage user profiles"];
+  }
+
+  return [];
+}
+
+function createIntentRepairLog(
+  error: string,
+  action: string,
+  outcome: "success" | "partial",
+  details: Record<string, unknown>
+): import("../types").RepairLog {
+  return {
+    timestamp: new Date().toISOString(),
+    stage: "intent",
+    strategy: "field_repair",
+    error,
+    action,
+    outcome,
+    details,
+  };
 }
