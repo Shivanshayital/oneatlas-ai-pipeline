@@ -7,24 +7,18 @@ import { logger } from "../logging/logger";
 
 export const MODEL_ROUTING = {
   intent: {
-    primary: "openai/gpt-oss-20b:free",
-    fallback: "moonshotai/kimi-k2:free",
-    secondaryFallback: "google/gemini-2.0-flash-exp:free",
-    tertiaryFallback: "meta-llama/llama-3.1-8b-instruct:free",
+    primary: "moonshotai/kimi-k2:free",
+    fallback: "meta-llama/llama-3.1-8b-instruct:free",
   },
 
   schema: {
-    primary: "openai/gpt-oss-20b:free",
-    fallback: "moonshotai/kimi-k2:free",
-    secondaryFallback: "google/gemini-2.0-flash-exp:free",
-    tertiaryFallback: "meta-llama/llama-3.1-8b-instruct:free",
+    primary: "moonshotai/kimi-k2:free",
+    fallback: "meta-llama/llama-3.1-8b-instruct:free",
   },
 
   spec: {
-    primary: "openai/gpt-oss-20b:free",
+    primary: "meta-llama/llama-3.1-8b-instruct:free",
     fallback: "moonshotai/kimi-k2:free",
-    secondaryFallback: "google/gemini-2.0-flash-exp:free",
-    tertiaryFallback: "meta-llama/llama-3.1-8b-instruct:free",
   },
 } as const;
 
@@ -78,7 +72,9 @@ async function readProviderError(response: Response): Promise<DetailedProviderEr
   } catch {}
 
   const normalized = message.toLowerCase();
-  if (response.status === 429) type = 'rate_limit';
+  if (response.status === 429 || normalized.includes("rate_limit") || normalized.includes("provider returned error")) {
+    type = 'rate_limit';
+  }
   else if (normalized.includes("quota") || normalized.includes("billing") || response.status === 402) type = 'quota';
   else if (normalized.includes("insufficient balance") || normalized.includes("credit")) type = 'balance';
   else if (response.status === 401 || response.status === 403) type = 'auth';
@@ -105,10 +101,9 @@ function requireContent(content: string | undefined, provider: AIProvider): stri
 // ============================================================================
 
 const OPENROUTER_SPECIFIC_MODELS: string[] = [
-  "openai/gpt-oss-20b:free",
   "moonshotai/kimi-k2:free",
-  "google/gemini-2.0-flash-exp:free",
   "meta-llama/llama-3.1-8b-instruct:free",
+  "google/gemini-2.0-flash-exp:free",
   // Add any other OpenRouter models that don't start with "openrouter/" but should be routed there
 ];
 
@@ -125,7 +120,13 @@ const NATIVE_PROVIDERS: AIProvider[] = ["openai", "groq", "gemini", "deepseek"];
  */
 export function resolveProviderAndModel(route: string): { provider: AIProvider; model: string } {
   // 1. Check for specific OpenRouter models that don't use the "openrouter/" prefix
-  if (OPENROUTER_SPECIFIC_MODELS.includes(route)) {
+  if (
+    OPENROUTER_SPECIFIC_MODELS.includes(route) ||
+    route.startsWith("openai/") ||
+    route.startsWith("moonshotai/") ||
+    route.startsWith("meta-llama/") ||
+    route.startsWith("google/")
+  ) {
     return {
       provider: "openrouter",
       model: route, // The entire route string is the model ID for OpenRouter in this case
@@ -246,7 +247,7 @@ class ProviderHealthCache {
     if (normalized.includes("quota") || normalized.includes("billing") || normalized.includes("balance")) {
       return PROVIDER_HEALTH_COOLDOWNS_MS.quota;
     }
-    if (normalized.includes("rate limit") || normalized.includes("429")) {
+    if (normalized.includes("rate limit") || normalized.includes("429") || normalized.includes("provider returned error")) {
       return PROVIDER_HEALTH_COOLDOWNS_MS.rate_limit;
     }
     if (normalized.includes("abort") || normalized.includes("timeout")) {
@@ -1048,7 +1049,7 @@ export class AIGatewayWithFallback implements AIGateway {
           model: chosenModel,
         };
         if (candidate !== request.provider) {
-          console.info(`Routing request to fallback provider ${candidate}/${chosenModel}`);
+          logger.info(`Routing request to fallback provider ${candidate}/${chosenModel}`);
         }
         return await this.gateway.send(fallbackRequest);
       } catch (err) {

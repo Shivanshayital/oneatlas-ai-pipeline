@@ -47,6 +47,7 @@ function resolveProviderAndModel(
     route.startsWith("openai/") ||
     route.startsWith("moonshotai/") ||
     route.startsWith("meta-llama/") ||
+    route.startsWith("meta-llama/") ||
     route.startsWith("google/")
   ) {
     return {
@@ -134,14 +135,11 @@ Structure:
     }
   ]
 }`;
-const SPEC_PART_META_PROMPT = `Generate Spec Metadata and Pages. ${COMPACT_MODE}
-Structure: {"metadata":{"app_name":"string","app_type":"string"},"pages":[{"name":"string","path":"/string","title":"string","requires_auth":true,"components":["string"]}],"auth_rules":[]}`;
+const SPEC_PART_META_PROMPT = `Gen Spec Meta+Pages. JSON ONLY. {"metadata":{"app_name":"str","app_type":"str"},"pages":[{"name":"str","path":"/str","title":"str","requires_auth":bool,"components":["str"]}],"auth_rules":[]}`;
 
-const SPEC_PART_ENDPOINTS_PROMPT = `Generate API Endpoints for schema. ${COMPACT_MODE}
-Structure: {"api_endpoints":[{"path":"/api/string","method":"GET|POST|PUT|DELETE","entity":"string","auth_required":true,"response_type":"json"}]}`;
+const SPEC_PART_ENDPOINTS_PROMPT = `Gen API Endpoints. JSON ONLY. {"api_endpoints":[{"path":"/api/str","method":"GET|POST|PUT|DELETE","entity":"str","auth_required":bool,"response_type":"json"}]}`;
 
-const SPEC_PART_FLOWS_PROMPT = `Generate Workflows and Hooks. ${COMPACT_MODE}
-Structure: {"integration_hooks":[{"integration_id":"string","trigger":"string","action":"string"}],"workflows":[{"name":"string","trigger_type":"event","trigger_entity":"string","steps":[]}],"assumptions":[]}`;
+const SPEC_PART_FLOWS_PROMPT = `Gen Workflows. JSON ONLY. {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
 
 // ============================================================================
 // Real Pipeline Execution with Full Observability
@@ -244,13 +242,21 @@ export class PipelineExecutor {
     max_tokens: number
   ): Promise<AIResponse> { // Explicit return type
     const modelRoutingConfig = MODEL_ROUTING[stage as keyof typeof MODEL_ROUTING];
-    const routes = [
-      modelRoutingConfig.primary,
-      modelRoutingConfig.fallback,
-      modelRoutingConfig.secondaryFallback, // Add secondary fallback
-      modelRoutingConfig.tertiaryFallback,
-    ].filter(Boolean) as string[]; // Filter out undefined/null
+    type RoutingConfig = {
+  primary: string;
+  fallback?: string;
+  secondaryFallback?: string;
+  tertiaryFallback?: string;
+};
 
+const typedRoutingConfig = modelRoutingConfig as RoutingConfig;
+
+const routes = [
+  typedRoutingConfig.primary,
+  typedRoutingConfig.fallback,
+  typedRoutingConfig.secondaryFallback,
+  typedRoutingConfig.tertiaryFallback,
+].filter((r): r is string => typeof r === "string");
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < routes.length; attempt += 1) {
@@ -795,7 +801,7 @@ if (
         { role: "user", content: `Context: ${prompt}\nSchema: ${schemaJson}` },
       ],
       0.3,
-      500 // Limit each section
+      1200 // Cap spec chunks
     );
 
     const extract = extractJSON(response.content);
