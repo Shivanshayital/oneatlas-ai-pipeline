@@ -44,11 +44,9 @@ function resolveProviderAndModel(
 } {
   // OpenRouter-hosted models
   if (
-    route.startsWith("openai/") ||
-    route.startsWith("moonshotai/") ||
     route.startsWith("meta-llama/") ||
-    route.startsWith("meta-llama/") ||
-    route.startsWith("google/")
+    route.startsWith("google/") ||
+    route.includes(":free")
   ) {
     return {
       provider: "openrouter",

@@ -7,18 +7,18 @@ import { logger } from "../logging/logger";
 
 export const MODEL_ROUTING = {
   intent: {
-    primary: "moonshotai/kimi-k2:free",
-    fallback: "meta-llama/llama-3.1-8b-instruct:free",
+    primary: "meta-llama/llama-3.1-8b-instruct:free",
+    fallback: "google/gemma-2-9b-it:free",
   },
 
   schema: {
-    primary: "moonshotai/kimi-k2:free",
-    fallback: "meta-llama/llama-3.1-8b-instruct:free",
+    primary: "meta-llama/llama-3.1-8b-instruct:free",
+    fallback: "google/gemma-2-9b-it:free",
   },
 
   spec: {
-    primary: "meta-llama/llama-3.1-8b-instruct:free",
-    fallback: "moonshotai/kimi-k2:free",
+    primary: "google/gemma-2-9b-it:free",
+    fallback: "meta-llama/llama-3.1-8b-instruct:free",
   },
 } as const;
 
@@ -101,9 +101,9 @@ function requireContent(content: string | undefined, provider: AIProvider): stri
 // ============================================================================
 
 const OPENROUTER_SPECIFIC_MODELS: string[] = [
-  "moonshotai/kimi-k2:free",
   "meta-llama/llama-3.1-8b-instruct:free",
   "google/gemini-2.0-flash-exp:free",
+  "google/gemma-2-9b-it:free",
   // Add any other OpenRouter models that don't start with "openrouter/" but should be routed there
 ];
 
@@ -122,8 +122,6 @@ export function resolveProviderAndModel(route: string): { provider: AIProvider; 
   // 1. Check for specific OpenRouter models that don't use the "openrouter/" prefix
   if (
     OPENROUTER_SPECIFIC_MODELS.includes(route) ||
-    route.startsWith("openai/") ||
-    route.startsWith("moonshotai/") ||
     route.startsWith("meta-llama/") ||
     route.startsWith("google/")
   ) {
@@ -1009,8 +1007,8 @@ export class AIGatewayWithFallback implements AIGateway {
       this._logProviderSkipOnce(request.provider);
     }
 
-    // Fallback selection order: OpenRouter -> Groq -> DeepSeek -> Gemini -> OpenAI
-    const fallbackOrder: AIProvider[] = ["openrouter", "groq", "deepseek", "gemini", "openai"];
+    // consolidated fallback order: OpenRouter -> OpenAI (native fallback)
+    const fallbackOrder: AIProvider[] = ["openrouter", "openai"];
 
     // Default model mapping per provider (safe fallbacks)
     const DEFAULT_MODEL: Record<AIProvider, string> = {
@@ -1020,7 +1018,7 @@ export class AIGatewayWithFallback implements AIGateway {
       openai: "gpt-4o-mini", // OpenAI's cost-effective model
       anthropic: "",
       mistral: "",
-      openrouter: "openai/gpt-oss-20b:free", // Primary OpenRouter fallback model
+      openrouter: "meta-llama/llama-3.1-8b-instruct:free", // Primary OpenRouter fallback model
     };
 
     let lastError: Error | null = null;
@@ -1055,9 +1053,13 @@ export class AIGatewayWithFallback implements AIGateway {
       } catch (err) {
         providerHealth.markFailure(candidate, err);
         lastError = err as Error;
+        
+        const isUnavailable = String(err).toLowerCase().includes("unavailable") || 
+                             String(err).toLowerCase().includes("no endpoints found");
+
         this._logProviderFailureOnce(
           candidate,
-          `Fallback provider ${candidate} failed; trying next provider`,
+          `${isUnavailable ? 'Unavailable model skip' : 'Fallback provider failure'}: ${candidate} failed; trying next...`,
           err
         );
       }

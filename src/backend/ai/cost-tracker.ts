@@ -19,6 +19,7 @@ const TOKEN_PRICING_PER_MILLION_INPUT_USD: Record<string, number> = {
   "deepseek/deepseek-chat": 0.10, // Estimate, DeepSeek pricing is per 1M tokens
   "deepseek/deepseek-coder": 0.10, // Estimate
   "openrouter/openai/gpt-oss-20b:free": 0.01,
+  "openrouter/google/gemma-2-9b-it:free": 0.01,
   "openrouter/moonshotai/kimi-k2:free": 0.01,
   "openrouter/meta-llama/llama-3.1-8b-instruct:free": 0.01,
   "openrouter/google/gemini-2.0-flash-exp:free": 0.01,
@@ -42,6 +43,7 @@ const TOKEN_PRICING_PER_MILLION_OUTPUT_USD: Record<string, number> = {
   "deepseek/deepseek-chat": 0.10, // Estimate
   "deepseek/deepseek-coder": 0.10, // Estimate
   "openrouter/openai/gpt-oss-20b:free": 0.01,
+  "openrouter/google/gemma-2-9b-it:free": 0.01,
   "openrouter/moonshotai/kimi-k2:free": 0.01,
   "openrouter/meta-llama/llama-3.1-8b-instruct:free": 0.01,
   "openrouter/google/gemini-2.0-flash-exp:free": 0.01,
