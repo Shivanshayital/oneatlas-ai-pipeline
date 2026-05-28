@@ -9,7 +9,7 @@ import {
   JobResult,
   PipelineMetrics,
   AIProvider, // Import AIProvider
-  RepairLog,
+  
 } from "../types";
 import { MultiProviderGateway, MODEL_ROUTING } from "../ai/gateway";
 import { validationEngine } from "../validation/engine";
