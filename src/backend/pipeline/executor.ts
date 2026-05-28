@@ -46,6 +46,7 @@ function resolveProviderAndModel(
   if (
     route.startsWith("meta-llama/") ||
     route.startsWith("google/") ||
+    route.startsWith("mistralai/") ||
     route.includes(":free")
   ) {
     return {
@@ -799,7 +800,7 @@ if (
         { role: "user", content: `Context: ${prompt}\nSchema: ${schemaJson}` },
       ],
       0.3,
-      1200 // Cap spec chunks
+      1000 // Cap spec chunks to reduce load
     );
 
     const extract = extractJSON(response.content);

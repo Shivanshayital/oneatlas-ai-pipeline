@@ -7,18 +7,18 @@ import { logger } from "../logging/logger";
 
 export const MODEL_ROUTING = {
   intent: {
-    primary: "meta-llama/llama-3.1-8b-instruct:free",
-    fallback: "google/gemma-2-9b-it:free",
+    primary: "google/gemma-2-9b-it:free",
+    fallback: "mistralai/mistral-7b-instruct:free",
   },
 
   schema: {
-    primary: "meta-llama/llama-3.1-8b-instruct:free",
-    fallback: "google/gemma-2-9b-it:free",
+    primary: "google/gemma-2-9b-it:free",
+    fallback: "mistralai/mistral-7b-instruct:free",
   },
 
   spec: {
-    primary: "google/gemma-2-9b-it:free",
-    fallback: "meta-llama/llama-3.1-8b-instruct:free",
+    primary: "mistralai/mistral-7b-instruct:free",
+    fallback: "google/gemma-2-9b-it:free",
   },
 } as const;
 
@@ -101,9 +101,9 @@ function requireContent(content: string | undefined, provider: AIProvider): stri
 // ============================================================================
 
 const OPENROUTER_SPECIFIC_MODELS: string[] = [
-  "meta-llama/llama-3.1-8b-instruct:free",
   "google/gemini-2.0-flash-exp:free",
   "google/gemma-2-9b-it:free",
+  "mistralai/mistral-7b-instruct:free",
   // Add any other OpenRouter models that don't start with "openrouter/" but should be routed there
 ];
 
@@ -123,7 +123,9 @@ export function resolveProviderAndModel(route: string): { provider: AIProvider; 
   if (
     OPENROUTER_SPECIFIC_MODELS.includes(route) ||
     route.startsWith("meta-llama/") ||
-    route.startsWith("google/")
+    route.startsWith("google/") ||
+    route.startsWith("mistralai/") ||
+    route.includes(":free")
   ) {
     return {
       provider: "openrouter",
@@ -1007,18 +1009,18 @@ export class AIGatewayWithFallback implements AIGateway {
       this._logProviderSkipOnce(request.provider);
     }
 
-    // consolidated fallback order: OpenRouter -> OpenAI (native fallback)
-    const fallbackOrder: AIProvider[] = ["openrouter", "openai"];
+    // consolidated fallback order: OpenRouter only as per requirement
+    const fallbackOrder: AIProvider[] = ["openrouter"];
 
     // Default model mapping per provider (safe fallbacks)
     const DEFAULT_MODEL: Record<AIProvider, string> = {
-      gemini: "gemini-1.5-flash", // Prefer flash for speed/cost
-      deepseek: "deepseek-chat",
-      groq: "llama-3.3-70b-versatile", // Groq's fast model
-      openai: "gpt-4o-mini", // OpenAI's cost-effective model
+      gemini: "",
+      deepseek: "",
+      groq: "",
+      openai: "",
       anthropic: "",
       mistral: "",
-      openrouter: "meta-llama/llama-3.1-8b-instruct:free", // Primary OpenRouter fallback model
+      openrouter: "google/gemma-2-9b-it:free", // Primary OpenRouter fallback model
     };
 
     let lastError: Error | null = null;
@@ -1054,12 +1056,19 @@ export class AIGatewayWithFallback implements AIGateway {
         providerHealth.markFailure(candidate, err);
         lastError = err as Error;
         
-        const isUnavailable = String(err).toLowerCase().includes("unavailable") || 
-                             String(err).toLowerCase().includes("no endpoints found");
+        const errorStr = String(err).toLowerCase();
+        const isUnavailable = errorStr.includes("unavailable") || 
+                             errorStr.includes("no endpoints found") ||
+                             errorStr.includes("provider returned error") ||
+                             errorStr.includes("rate_limit");
+
+        if (isUnavailable) {
+          logger.warn(`[Gateway] Skipped unavailable model ${candidate}/${chosenModel}: ${errorStr}`);
+        }
 
         this._logProviderFailureOnce(
           candidate,
-          `${isUnavailable ? 'Unavailable model skip' : 'Fallback provider failure'}: ${candidate} failed; trying next...`,
+          `${isUnavailable ? 'Skipped unavailable model' : 'Fallback provider failure'}: ${candidate} failed; trying next provider`,
           err
         );
       }
