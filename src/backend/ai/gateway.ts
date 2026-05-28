@@ -17,10 +17,12 @@ export const MODEL_ROUTING = {
   },
 
   // Prefer faster instruct/free models for spec generation
+  // Reasoning models are avoided here as they increase latency for structured JSON tasks.
   spec: {
     primary: "openrouter/google/gemma-2-9b-it:free",
     fallback: "openrouter/mistralai/mistral-7b-instruct:free",
-    secondaryFallback: "openrouter/meta-llama/llama-3.1-8b-instruct:free",
+    secondaryFallback: "openrouter/qwen/qwen-2.5-7b-instruct:free",
+    tertiaryFallback: "deepseek/deepseek-chat",
   },
 } as const;
 

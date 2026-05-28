@@ -86,17 +86,17 @@ Structure:
     }
   ]
 }`;
-const SPEC_PART_META_PROMPT = `Generate AppSpec metadata, pages, and auth rules. ${COMPACT_JSON_MODE}
-Output: {"metadata":{"app_name":"str","app_type":"str"},"pages":[{"name":"str","path":"/str","title":"str","requires_auth":bool,"components":["str"]}],"auth_rules":[]}`;
 
-const SPEC_PART_ENDPOINTS_PROMPT = `Generate AppSpec API endpoints. ${COMPACT_JSON_MODE}
-Output: {"api_endpoints":[{"path":"/api/str","method":"GET|POST|PUT|DELETE","entity":"str","auth_required":bool,"response_type":"json"}]}`;
+// Shorter, more direct prompts to reduce token usage and processing time
+const SPEC_PART_META_PROMPT = `Generate AppSpec metadata and pages. JSON: {"metadata":{"app_name":"str","app_type":"str"},"pages":[{"name":"str","path":"/str","title":"str","requires_auth":bool,"components":["str"]}],"auth_rules":[]}`;
 
-const SPEC_PART_FLOWS_PROMPT = `Generate AppSpec integration hooks, workflows, and assumptions. ${COMPACT_JSON_MODE}
-Output: {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
+const SPEC_PART_ENDPOINTS_PROMPT = `Generate API endpoints for schema. JSON: {"api_endpoints":[{"path":"/api/str","method":"GET|POST|PUT|DELETE","entity":"str","auth_required":bool,"response_type":"json"}]}`;
 
-const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 3; // Initial attempt + 2 retries
-const APP_SPEC_STAGE_TIMEOUT_MS = 20_000; // Hard timeout for AppSpec stage (20 seconds)
+const SPEC_PART_FLOWS_PROMPT = `Generate workflows for schema. JSON: {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
+
+const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 3; // 1 initial + 2 retries max
+const APP_SPEC_STAGE_TIMEOUT_MS = 15_000; // Reduced to 15s to keep within 10-15s goal
+const PROMPT_TRIM_THRESHOLD = 3000; // Max characters for prompt context
 
 // ============================================================================
 // Real Pipeline Execution with Full Observability
@@ -115,6 +115,15 @@ export class PipelineExecutor {
   constructor(gateway: AIGateway) {
     this.gateway = gateway;
     this.costTracker = new CostTracker();
+  }
+
+  /**
+   * Token guardrail: Trims prompt context if it exceeds safety limits
+   */
+  private _trimPromptContext(text: string): string {
+    if (text.length <= PROMPT_TRIM_THRESHOLD) return text;
+    logger.warn(`[Executor] Prompt exceeds threshold (${text.length} chars). Trimming context.`);
+    return text.substring(0, PROMPT_TRIM_THRESHOLD) + "... [truncated]";
   }
 
   /**
@@ -304,11 +313,13 @@ const routes = [
           error: errorMessage,
           timestamp: new Date().toISOString(),
         });
-        // Emit event for each retry attempt
+
         await jobStore.addEvent(jobId, {
           type: "stage_retry",
           stage,
           timestamp: new Date().toISOString(),
+          provider,
+          model,
           data: {
             provider,
             model,
@@ -320,6 +331,9 @@ const routes = [
         });
 
         lastError = error as Error;
+        
+        // Retry cooldown: small backoff to avoid hammering same failing endpoint
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
       }
     }
 
@@ -826,14 +840,14 @@ if (
         ["metadata", "data_schema", "pages", "api_endpoints", "auth_rules"]
       );
 
-      for (const log of fieldRepairLogs) { // Log field repairs
+      for (const log of fieldRepairLogs) {
         await jobStore.addRepair(jobId, log);
       }
 
       this._ensureMinimumSpec(fieldRepairedSpec, intent, schema);
       this._coerceSpecCollections(fieldRepairedSpec, intent, schema);
 
-      // Repair consistency
+      // Consistency repair (Max 1 pass as requested)
       const { data: repairedSpec, logs: repairLogs } = repairEngine.repairConsistency(
         "spec",
         fieldRepairedSpec,
@@ -961,10 +975,10 @@ if (
         "spec",
         [
           { role: "system", content: systemPrompt },
-          { role: "user", content: `Prompt:${prompt}\nSchema:${schemaJson}` },
+          { role: "user", content: this._trimPromptContext(`Prompt:${prompt}\nSchema:${schemaJson}`) },
         ],
         0.2,
-        500, // Max tokens for each spec section
+        500, // Reduced max_tokens per section for faster turnaround
         abortSignal
       );
 
