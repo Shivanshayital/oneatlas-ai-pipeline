@@ -20,7 +20,7 @@ import {
   DataSchemaSchema,
   AppSpecSchema,
 } from "../schemas";
-import { extractJSON } from "../utils/helpers";
+import { extractJSON } from "../utils/json-repair";
 import { CostTracker } from "../ai/cost-tracker";
 import { jobStore } from "../store/job-store";
 import { logger } from "../logging/logger";
