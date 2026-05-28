@@ -209,7 +209,7 @@ const globalHealthRef = globalThis as unknown as {
   __ONEATLAS_PROVIDER_HEALTH?: ProviderHealthCache;
 };
 
-const providerHealth =
+export const providerHealth =
   globalHealthRef.__ONEATLAS_PROVIDER_HEALTH ??
   (globalHealthRef.__ONEATLAS_PROVIDER_HEALTH = new ProviderHealthCache());
 
