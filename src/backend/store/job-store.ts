@@ -259,7 +259,7 @@ export class JobStore {
           requests > 0
             ? "active"
             : failures > 0
-              ? "unhealthy"
+              ? "failed"
               : configuredProviders.includes(provider)
                 ? "healthy"
                 : "inactive",
