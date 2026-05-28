@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { jobStore } from "@/backend/store/job-store";
+import { JobState } from "@/backend/store/job-store";
 import { StageEvent } from "@/backend/types";
 import { logger } from "@/backend/logging/logger";
 import { initializePipeline, loadConfig } from "@/backend/config";
@@ -14,12 +15,12 @@ interface Params {
 }
 
 export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<Params> }
-): Promise<NextResponse> {
+  request: Request,
+  context: { params: Promise<Params> }
+): Promise<Response> {
   try {
-    const { jobId } = await params;
-    logger.info(`[SSE] Connection requested for job: ${jobId}`);
+    const { jobId } = await context.params;
+    logger.info("Stream connected", { jobId });
     
     const { searchParams } = new URL(request.url);
     const promptFallback = searchParams.get("prompt");
@@ -31,19 +32,13 @@ export async function GET(
       return NextResponse.json({ error: "Invalid job ID" }, { status: 400 });
     }
 
-    let jobState = jobStore.getJob(jobId);
-
-    // Self-healing for Vercel statelessness
-    if (!jobState && promptFallback) {
-      logger.info(`[SSE] Rehydrating missing job state: ${jobId}`);
-      jobStore.createJob(jobId, promptFallback);
-      jobState = jobStore.getJob(jobId);
-    }
+    const jobState = await waitForJobState(jobId, promptFallback);
 
     if (!jobState) {
+      logger.warn("Stream waiting for job timed out", { jobId });
       return NextResponse.json(
-        { error: "Job not found. Rehydration failed - please provide a prompt parameter." },
-        { status: 404 }
+        { status: "waiting", job_id: jobId },
+        { status: 202 }
       );
     }
 
@@ -84,6 +79,7 @@ export async function GET(
 
           try {
             controller.close();
+            logger.info("Stream closed", { jobId });
           } catch (error) {
             logger.warn("SSE stream close ignored after controller closed", {
               jobId,
@@ -100,7 +96,7 @@ export async function GET(
           } catch (error) {
             isClosed = true;
             cleanupOnce();
-            logger.warn("SSE enqueue ignored after stream closed", {
+            logger.warn("Stream failed", {
               jobId,
               error: String(error),
             });
@@ -121,6 +117,10 @@ export async function GET(
 
         // If already completed, send final event and close
         if (jobState.job.status === "completed" || jobState.job.status === "failed") {
+          const terminalEvent = terminalEventForJob(jobState.job.status, jobState.job.error);
+          if (terminalEvent) {
+            safeEnqueue(formatSSEMessage(terminalEvent));
+          }
           safeClose();
           return;
         }
@@ -146,18 +146,39 @@ export async function GET(
         if (jobStore.startProcessing(jobId)) {
           logger.info(`[SSE] Starting pipeline execution for job: ${jobId}`);
           
-          const config = loadConfig();
-          const gateway = initializePipeline(config);
-          const executor = new PipelineExecutor(gateway);
+          try {
+            const config = loadConfig();
+            const gateway = initializePipeline(config);
+            const executor = new PipelineExecutor(gateway);
 
-          executor.executePipeline(jobId, jobState.job.prompt).catch((error) => {
-            logger.error("Pipeline execution error", error as Error, { jobId });
-          });
+            executor.executePipeline(jobId, jobState.job.prompt).catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              logger.error("Stream failed", error instanceof Error ? error : new Error(message), { jobId });
+              jobStore.setJobError(jobId, message);
+              jobStore.addEvent(jobId, {
+                type: "stage_failed",
+                stage: "failed",
+                timestamp: new Date().toISOString(),
+                error: message,
+              });
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error("Stream failed", error instanceof Error ? error : new Error(message), { jobId });
+            jobStore.setJobError(jobId, message);
+            jobStore.addEvent(jobId, {
+              type: "stage_failed",
+              stage: "failed",
+              timestamp: new Date().toISOString(),
+              error: message,
+            });
+          }
         }
       },
       cancel(): void {
         cleanup?.(); // Call cleanup if it exists
         cleanup = undefined;
+        logger.info("Stream closed", { jobId, reason: "client_cancel" });
       },
     });
 
@@ -171,7 +192,7 @@ export async function GET(
       },
     });
   } catch (error) {
-    logger.error("GET /api/generate/:jobId/stream failed", error as Error); // Explicit cast
+    logger.error("Stream failed", error as Error); // Explicit cast
     return NextResponse.json(
       { error: "Failed to stream job updates" },
       { status: 500 }
@@ -181,4 +202,55 @@ export async function GET(
 
 function formatSSEMessage(event: StageEvent): string {
   return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+async function waitForJobState(
+  jobId: string,
+  promptFallback: string | null
+): Promise<JobState | undefined> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt <= 3000) {
+    const jobState = jobStore.getJob(jobId);
+    if (jobState) {
+      return jobState;
+    }
+
+    if (promptFallback && promptFallback.trim().length >= 10) {
+      logger.info("Stream waiting for job; rehydrating from prompt fallback", { jobId });
+      jobStore.createJob(jobId, promptFallback.trim());
+      return jobStore.getJob(jobId);
+    }
+
+    logger.info("Stream waiting for job", { jobId });
+    await sleep(150);
+  }
+
+  return undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function terminalEventForJob(
+  status: "completed" | "failed",
+  error?: string
+): StageEvent | undefined {
+  if (status === "completed") {
+    return {
+      type: "generation_complete",
+      stage: "complete",
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  return {
+    type: "stage_failed",
+    stage: "failed",
+    timestamp: new Date().toISOString(),
+    error: error ?? "Job failed",
+  };
 }

@@ -70,9 +70,10 @@ export default function HomePage(): ReactElement {
     }
   };
 
-  const subscribeToSse = (id: string): void => {
+  const subscribeToSse = (id: string, prompt: string, retryCount: number = 0): void => {
     eventSourceRef.current?.close();
-    const source = new EventSource(`/api/generate/${id}/stream`);
+    const params = new URLSearchParams({ prompt });
+    const source = new EventSource(`/api/generate/${id}/stream?${params.toString()}`);
     eventSourceRef.current = source;
 
     source.addEventListener("message", (event) => {
@@ -150,9 +151,13 @@ export default function HomePage(): ReactElement {
         eventSourceRef.current = null;
       }
       setTimeout(() => {
-        if (statusRef.current === "running") {
-          subscribeToSse(id);
+        if ((statusRef.current === "pending" || statusRef.current === "running") && retryCount < 5) {
+          subscribeToSse(id, prompt, retryCount + 1);
         } else {
+          if (statusRef.current === "pending" || statusRef.current === "running") {
+            setStatus("failed");
+            setErrorMessage("Stream connection failed.");
+          }
           setIsExecuting(false);
         }
       }, 1200);
@@ -184,7 +189,7 @@ export default function HomePage(): ReactElement {
 
       setJobId(data.job_id);
       setProviderUsageSummary(createProviderSummary(data.available_providers));
-      subscribeToSse(data.job_id);
+      subscribeToSse(data.job_id, prompt);
     } catch (error) {
       setErrorMessage(String(error));
       setStatus("failed");
