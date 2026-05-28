@@ -101,6 +101,62 @@ function requireContent(content: string | undefined, provider: AIProvider): stri
 }
 
 // ============================================================================
+// Provider/Model Resolution Helper
+// ============================================================================
+
+const OPENROUTER_SPECIFIC_MODELS: string[] = [
+  "openai/gpt-oss-20b:free",
+  "moonshotai/kimi-k2:free",
+  "google/gemini-2.0-flash-exp:free",
+  "meta-llama/llama-3.1-8b-instruct:free",
+  // Add any other OpenRouter models that don't start with "openrouter/" but should be routed there
+];
+
+const NATIVE_PROVIDERS: AIProvider[] = ["openai", "groq", "gemini", "deepseek"];
+
+/**
+ * Resolves the AI provider and model name from a route string.
+ * This handles OpenRouter models which might have prefixes resembling native providers
+ * but should be routed through the OpenRouter gateway.
+ *
+ * @param route The full model identifier string from MODEL_ROUTING (e.g., "openai/gpt-oss-20b:free" or "groq/llama-3.3-70b-versatile").
+ * @returns An object containing the resolved provider and model.
+ * @throws Error if the route format is unrecognized.
+ */
+export function resolveProviderAndModel(route: string): { provider: AIProvider; model: string } {
+  // 1. Check for specific OpenRouter models that don't use the "openrouter/" prefix
+  if (OPENROUTER_SPECIFIC_MODELS.includes(route)) {
+    return {
+      provider: "openrouter",
+      model: route, // The entire route string is the model ID for OpenRouter in this case
+    };
+  }
+
+  // 2. Check for routes explicitly prefixed with "openrouter/"
+  if (route.startsWith("openrouter/")) {
+    return {
+      provider: "openrouter",
+      model: route.substring("openrouter/".length),
+    };
+  }
+
+  // 3. For native providers (e.g., "groq/llama-3.3-70b-versatile", "gemini/gemini-1.5-flash")
+  const slashIndex = route.indexOf("/");
+  if (slashIndex !== -1) {
+    const providerPrefix = route.substring(0, slashIndex) as AIProvider;
+    if (NATIVE_PROVIDERS.includes(providerPrefix)) {
+      return {
+        provider: providerPrefix,
+        model: route.substring(slashIndex + 1),
+      };
+    }
+  }
+
+  logger.error(`[resolveProviderAndModel] Unrecognized route format or provider for: ${route}.`);
+  throw new Error(`Unrecognized AI provider or model format: ${route}`);
+}
+
+// ============================================================================
 // Provider Health Cache
 // ============================================================================
 
@@ -770,8 +826,9 @@ export class MultiProviderGateway implements AIGateway {
     }
     if (provider === "openrouter") {
       return [
-        "openai/gpt-oss-20b:free",
-        "google/gemini-2.0-flash-exp:free",
+        "openai/gpt-oss-20b:free", // Example OpenRouter model
+        "moonshotai/kimi-k2:free", // Example OpenRouter model
+        "google/gemini-2.0-flash-exp:free", // Example OpenRouter model
         "deepseek/deepseek-chat",
         "meta-llama/llama-3.3-70b-instruct",
         "openai/gpt-4o-mini",

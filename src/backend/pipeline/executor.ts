@@ -9,14 +9,16 @@ import {
   LatencyMetrics,
   AIProvider,
   AIResponse,
-  PipelineMetrics,
+  PipelineMetrics, // Keep PipelineMetrics
   PipelineStage,
 } from "../types/index";
 import { AIGateway, MODEL_ROUTING } from "../ai/gateway";
 import { validationEngine } from "../validation/engine";
+
 import { repairEngine } from "../repair/engine";
 import {
   AppIntentSchema,
+  // DataSchemaSchema, // Not directly used here, but in _executeSchemaStage
   DataSchemaSchema,
   AppSpecSchema,
 } from "../schemas";
@@ -27,13 +29,62 @@ import { logger } from "../logging/logger";
 import {
   getIntegration,
   validateIntegrationAction,
+  // validateIntegrationTrigger, // Not directly used here
   validateIntegrationTrigger,
 } from "../integrations/registry";
 
 // ============================================================================
 // System Prompts for Each Stage
 // ============================================================================
+function resolveProviderAndModel(
+  route: string
+): {
+  provider: AIProvider;
+  model: string;
+} {
+  // OpenRouter-hosted models
+  if (
+    route.startsWith("openai/") ||
+    route.startsWith("moonshotai/") ||
+    route.startsWith("meta-llama/") ||
+    route.startsWith("google/")
+  ) {
+    return {
+      provider: "openrouter",
+      model: route,
+    };
+  }
 
+  // Native Groq models
+  if (route.startsWith("groq/")) {
+    return {
+      provider: "groq",
+      model: route.replace("groq/", ""),
+    };
+  }
+
+  // Native DeepSeek models
+  if (route.startsWith("deepseek/")) {
+    return {
+      provider: "deepseek",
+      model: route.replace("deepseek/", ""),
+    };
+  }
+
+  // Native Gemini models
+  if (route.startsWith("gemini/")) {
+    return {
+      provider: "gemini",
+      model: route.replace("gemini/", ""),
+    };
+  }
+
+  // Fallback
+  return {
+    provider: "openrouter",
+    model: route,
+  };
+}
 const COMPACT_MODE = "Return minified JSON only. No markdown. No explanations.";
 
 const INTENT_EXTRACTION_PROMPT = `Extract app intent. ${COMPACT_MODE}
@@ -204,10 +255,9 @@ export class PipelineExecutor {
 
     for (let attempt = 0; attempt < routes.length; attempt += 1) {
       const route = routes[attempt];
-      const slashIndex = route.indexOf("/");
-      const provider = route.substring(0, slashIndex) as AIProvider;
-      const model = route.substring(slashIndex + 1);
-      
+      // Use the new helper function to resolve provider and model
+      const { provider, model } = resolveProviderAndModel(route);
+
       logger.info(`[Executor] Attempting stage ${stage} (attempt ${attempt + 1}) using ${provider}/${model}`);
 
       try {
