@@ -95,7 +95,11 @@ const SPEC_PART_ENDPOINTS_PROMPT = `Generate API endpoints for schema. JSON: {"a
 const SPEC_PART_FLOWS_PROMPT = `Generate workflows for schema. JSON: {"integration_hooks":[{"integration_id":"str","trigger":"str","action":"str"}],"workflows":[{"name":"str","trigger_type":"event","trigger_entity":"str","steps":[]}],"assumptions":[]}`;
 
 const MAX_EXECUTOR_PROVIDER_ATTEMPTS = 3; // 1 initial + 2 retries max
-const APP_SPEC_STAGE_TIMEOUT_MS = 15_000; // Reduced to 15s to keep within 10-15s goal
+// COMMENT: Free models on OpenRouter can have unpredictable latency due to queuing.
+// 30s is a safer window for structured JSON generation involving multiple sequential LLM calls.
+// Partial recovery ensures the pipeline doesn't hard-fail if only one section (e.g., flows) hangs.
+const APP_SPEC_STAGE_TIMEOUT_MS = 30_000; 
+
 const PROMPT_TRIM_THRESHOLD = 3000; // Max characters for prompt context
 
 // ============================================================================
@@ -913,10 +917,23 @@ if (
 
       return spec;
     } catch (error) {
+      const elapsed = Date.now() - stageStartTime;
       const timedOut = didTimeout || controller.signal.aborted;
+      
+      // Classify timeout for better observability
+      let timeoutType: 'generation' | 'provider' | 'network' = 'generation';
+      const errorStr = String(error).toLowerCase();
+      if (errorStr.includes('fetch') || errorStr.includes('network')) {
+        timeoutType = 'network';
+      } else if (errorStr.includes('gateway') || errorStr.includes('provider')) {
+        timeoutType = 'provider';
+      }
+
       const errorMsg = timedOut
-        ? `AppSpec stage exceeded ${APP_SPEC_STAGE_TIMEOUT_MS}ms`
+        ? `AppSpec stage exceeded ${APP_SPEC_STAGE_TIMEOUT_MS}ms (${timeoutType} timeout)`
         : String(error);
+
+      logger.warn(`[Executor] Spec stage failure. Elapsed: ${elapsed}ms. Type: ${timeoutType}`, { jobId, timedOut });
 
       if (timedOut) {
         // If timeout, build and save a partial spec
@@ -932,6 +949,16 @@ if (
           spec: partialSpec,
           repairs_applied: await jobStore.getRepairs(jobId),
         });
+
+        await jobStore.addRepair(jobId, {
+          timestamp: new Date().toISOString(),
+          stage: "spec",
+          strategy: "structural_repair",
+          error: "Stage Timeout",
+          action: "Generated partial AppSpec from available sections and schema fallbacks",
+          outcome: "partial",
+          details: { elapsed_ms: elapsed, timeout_type: timeoutType },
+        });
       }
 
       // Record error and emit failed event
@@ -944,6 +971,7 @@ if (
         data: {
           timed_out: timedOut,
           partial_spec_available: timedOut,
+          elapsed_ms: elapsed,
         },
       });
       logger.error("Stage failure", error instanceof Error ? error : new Error(errorMsg), {
@@ -977,7 +1005,7 @@ if (
           { role: "system", content: systemPrompt },
           { role: "user", content: this._trimPromptContext(`Prompt:${prompt}\nSchema:${schemaJson}`) },
         ],
-        0.2,
+        0.2, // Low temperature for consistency in structured JSON
         500, // Reduced max_tokens per section for faster turnaround
         abortSignal
       );
