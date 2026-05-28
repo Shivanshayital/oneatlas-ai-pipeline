@@ -25,19 +25,19 @@ export async function GET(
       return NextResponse.json({ error: "Invalid job ID format" }, { status: 400 });
     }
 
-    const jobState = jobStore.getJob(jobId);
+    const jobState = await jobStore.getJob(jobId);
 
     if (!jobState) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
     const { job } = jobState;
-    const repairs = jobStore.getRepairs(jobId);
-    const events = jobStore.getEvents(jobId);
-    const providerHistory = jobStore.getProviderHistory(jobId);
-    const retryHistory = jobStore.getRetryHistory(jobId);
-    const validationSnapshots = jobStore.getValidationSnapshots(jobId);
-    const metrics = jobStore.getMetrics(jobId);
+    const repairs = await jobStore.getRepairs(jobId);
+    const events = await jobStore.getEvents(jobId);
+    const providerHistory = await jobStore.getProviderHistory(jobId);
+    const retryHistory = await jobStore.getRetryHistory(jobId);
+    const validationSnapshots = await jobStore.getValidationSnapshots(jobId);
+    const metrics = await jobStore.getMetrics(jobId);
     const configuredProviders = availableProviders(loadConfig()) as AIProvider[];
 
     const response: Record<string, unknown> = {
@@ -52,7 +52,7 @@ export async function GET(
       retry_history: retryHistory,
       validation_snapshots: validationSnapshots,
       metrics,
-      provider_usage_summary: jobStore.getProviderUsageSummary(jobId, configuredProviders),
+      provider_usage_summary: await jobStore.getProviderUsageSummary(jobId, configuredProviders),
     };
 
     if (job.result) {

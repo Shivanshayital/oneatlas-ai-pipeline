@@ -14,40 +14,58 @@ import {
 import { logger } from "../logging/logger";
 import { getModelHealthScore, getModelHealthSnapshot, providerHealth } from "../ai/gateway";
 
-// ============================================================================
-// Job Store - In-Memory State Management
-// ============================================================================
+const JOB_TTL_SECONDS = 60 * 60;
+const REDIS_RETRY_ATTEMPTS = 3;
+const REDIS_RETRY_DELAY_MS = 120;
 
 export interface JobState {
   job: PipelineJob;
   events: StageEvent[];
   repairs: RepairLog[];
-  stage_outputs: Record<string, unknown>; // Changed to Record<string, unknown> for dynamic access
+  stage_outputs: Record<string, unknown>;
   provider_history: ProviderUsage[];
   retry_history: RetryEntry[];
   validation_snapshots: ValidationSnapshot[];
   metrics: PipelineMetrics;
 }
 
+type JobStatus = PipelineJob["status"];
+type Listener = (event: StageEvent) => void;
+type RedisPrimitive = string | number;
+type RedisCommand = [string, ...RedisPrimitive[]];
+
+interface RedisEnvelope<T> {
+  result?: T;
+  error?: string;
+}
+
+interface RedisConfig {
+  url: string;
+  token: string;
+}
+
 export class JobStore {
-  private jobs: Map<string, JobState>;
-  private listeners: Map<string, Set<(event: StageEvent) => void>>;
+  private memoryJobs: Map<string, JobState>;
+  private listeners: Map<string, Set<Listener>>;
+  private redisConfig: RedisConfig | null;
 
   constructor() {
-    this.jobs = new Map();
+    this.memoryJobs = new Map();
     this.listeners = new Map();
+    this.redisConfig = resolveRedisConfig();
   }
 
-  createJob(id: string, prompt: string): PipelineJob {
+  async createJob(id: string, prompt: string): Promise<PipelineJob> {
+    const now = new Date().toISOString();
     const job: PipelineJob = {
       id,
       prompt,
       status: "pending",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+      created_at: now,
+      updated_at: now,
     };
 
-    this.jobs.set(id, {
+    const state: JobState = {
       job,
       events: [],
       repairs: [],
@@ -55,167 +73,182 @@ export class JobStore {
       provider_history: [],
       retry_history: [],
       validation_snapshots: [],
-      metrics: {
-        tokens: {
-          input_tokens: 0,
-          output_tokens: 0,
-          total_tokens: 0,
-          estimated_cost: 0,
-        },
-        latency: {
-          intent_stage_ms: 0,
-          schema_stage_ms: 0,
-          spec_stage_ms: 0,
-          total_ms: 0,
-        },
-        repair_attempts: 0,
-        successful_repairs: 0,
-      },
-    });
+      metrics: emptyMetrics(),
+    };
 
-    this.listeners.set(id, new Set());
+    await this.persistState(id, state);
+    this.listeners.set(id, this.listeners.get(id) ?? new Set());
 
-    logger.info(`[JobStore] Initialized job: ${id}`, {
-      activeJobs: this.jobs.size,
-      prompt_preview: prompt.substring(0, 50) + "..."
+    logger.info("Job created", {
+      jobId: id,
+      persistent: Boolean(this.redisConfig),
+      prompt_preview: prompt.substring(0, 50) + "...",
     });
 
     return job;
   }
 
-  getJob(id: string): JobState | undefined {
-    const state = this.jobs.get(id);
+  async getJob(id: string): Promise<JobState | undefined> {
+    const state = await this.readState(id);
     if (!state) {
-      logger.warn(`[JobStore] Job NOT FOUND: ${id}`, {
-        availableIds: Array.from(this.jobs.keys()),
-        instanceCount: this.jobs.size
+      logger.warn("Job not found", {
+        jobId: id,
+        persistent: Boolean(this.redisConfig),
       });
-    } else {
-      logger.debug(`[JobStore] Job retrieved: ${id}`);
+      return undefined;
     }
+
+    logger.debug("Job retrieved", { jobId: id, status: state.job.status });
     return state;
   }
 
-  updateJobStatus(
+  async updateJob(
     id: string,
-    status: "pending" | "processing" | "completed" | "failed"
-  ): void {
-    const state = this.jobs.get(id);
-    if (state) {
+    updater: Partial<PipelineJob> | ((state: JobState) => void | Promise<void>)
+  ): Promise<void> {
+    await this.mutateState(id, async (state) => {
+      if (typeof updater === "function") {
+        await updater(state);
+      } else {
+        state.job = {
+          ...state.job,
+          ...updater,
+          updated_at: new Date().toISOString(),
+        };
+      }
+    });
+    logger.info("Job updated", { jobId: id });
+  }
+
+  async updateJobStatus(id: string, status: JobStatus): Promise<void> {
+    await this.updateJob(id, { status });
+  }
+
+  async startProcessing(id: string): Promise<boolean> {
+    let started = false;
+
+    await this.mutateState(id, (state) => {
+      if (state.job.status !== "pending") {
+        return;
+      }
+
+      state.job.status = "processing";
+      state.job.updated_at = new Date().toISOString();
+      started = true;
+    });
+
+    if (started) {
+      logger.info("Job updated", { jobId: id, status: "processing" });
+    }
+
+    return started;
+  }
+
+  async setJobResult(id: string, result: JobResult): Promise<void> {
+    await this.finalizeJob(id, "completed", result);
+  }
+
+  async setPartialJobResult(id: string, result: JobResult): Promise<void> {
+    await this.updateJob(id, (state) => {
+      state.job.result = result;
+      state.job.updated_at = new Date().toISOString();
+    });
+  }
+
+  async setJobError(id: string, error: string): Promise<void> {
+    await this.finalizeJob(id, "failed", undefined, error);
+  }
+
+  async finalizeJob(
+    id: string,
+    status: "completed" | "failed",
+    result?: JobResult,
+    error?: string
+  ): Promise<void> {
+    await this.mutateState(id, (state) => {
       state.job.status = status;
       state.job.updated_at = new Date().toISOString();
-    }
+      if (result) {
+        state.job.result = result;
+      }
+      if (error) {
+        state.job.error = error;
+      }
+    });
+
+    logger.info("Job finalized", { jobId: id, status });
   }
 
-  startProcessing(id: string): boolean {
-    const state = this.jobs.get(id);
-    if (!state || state.job.status !== "pending") {
-      return false;
-    }
-
-    state.job.status = "processing";
-    state.job.updated_at = new Date().toISOString();
-    return true;
+  async appendStage(id: string, event: StageEvent): Promise<void> {
+    await this.addEvent(id, event);
   }
 
-  setJobResult(id: string, result: JobResult): void {
-    const state = this.jobs.get(id);
-    if (state) {
-      state.job.result = result;
-      state.job.status = "completed";
-      state.job.updated_at = new Date().toISOString();
-    }
-  }
-
-  setPartialJobResult(id: string, result: JobResult): void {
-    const state = this.jobs.get(id);
-    if (state) {
-      state.job.result = result;
-      state.job.updated_at = new Date().toISOString();
-    }
-  }
-
-  setJobError(id: string, error: string): void {
-    const state = this.jobs.get(id);
-    if (state) {
-      state.job.error = error;
-      state.job.status = "failed";
-      state.job.updated_at = new Date().toISOString();
-    }
-  }
-
-  addEvent(id: string, event: StageEvent): void {
-    const state = this.jobs.get(id);
-    if (state) {
+  async addEvent(id: string, event: StageEvent): Promise<void> {
+    await this.mutateState(id, (state) => {
       state.events.push(event);
-      this._notifyListeners(id, event);
-    }
+    });
+    this.notifyListeners(id, event);
   }
 
-  addRepair(id: string, repair: RepairLog): void {
-    const state = this.jobs.get(id);
-    if (state) {
+  async appendRepair(id: string, repair: RepairLog): Promise<void> {
+    await this.addRepair(id, repair);
+  }
+
+  async addRepair(id: string, repair: RepairLog): Promise<void> {
+    await this.mutateState(id, (state) => {
       state.repairs.push(repair);
-    }
+    });
   }
 
-  setStageOutput(id: string, stage: string, output: unknown): void {
-    const state = this.jobs.get(id);
-    if (state) {
-      state.stage_outputs[stage] = output; // Access directly, stage_outputs is typed
-    }
+  async setStageOutput(id: string, stage: string, output: unknown): Promise<void> {
+    await this.mutateState(id, (state) => {
+      state.stage_outputs[stage] = output;
+    });
   }
 
-  getStageOutput(id: string, stage: string): unknown {
-    const state = this.jobs.get(id);
-    if (state) {
-      return (state.stage_outputs as Record<string, unknown>)[stage];
-    } // Access directly, stage_outputs is typed
-    return undefined;
+  async getStageOutput(id: string, stage: string): Promise<unknown> {
+    const state = await this.getJob(id);
+    return state?.stage_outputs[stage];
   }
 
-  setMetrics(id: string, metrics: PipelineMetrics): void {
-    const state = this.jobs.get(id);
-    if (state) {
+  async setMetrics(id: string, metrics: PipelineMetrics): Promise<void> {
+    await this.mutateState(id, (state) => {
       state.metrics = metrics;
-    }
+    });
   }
 
-  getMetrics(id: string): PipelineMetrics | undefined {
-    return this.jobs.get(id)?.metrics;
+  async getMetrics(id: string): Promise<PipelineMetrics | undefined> {
+    return (await this.getJob(id))?.metrics;
   }
 
-  addProviderUsage(id: string, usage: ProviderUsage): void {
-    const state = this.jobs.get(id);
-    if (state) {
+  async addProviderUsage(id: string, usage: ProviderUsage): Promise<void> {
+    await this.mutateState(id, (state) => {
       state.provider_history.push(usage);
-    }
+    });
   }
 
-  addRetryHistory(id: string, retry: RetryEntry): void {
-    const state = this.jobs.get(id);
-    if (state) {
+  async addRetryHistory(id: string, retry: RetryEntry): Promise<void> {
+    await this.mutateState(id, (state) => {
       state.retry_history.push(retry);
-    }
+    });
   }
 
-  addValidationSnapshot(id: string, snapshot: ValidationSnapshot): void {
-    const state = this.jobs.get(id);
-    if (state) {
+  async addValidationSnapshot(id: string, snapshot: ValidationSnapshot): Promise<void> {
+    await this.mutateState(id, (state) => {
       state.validation_snapshots.push(snapshot);
-    }
+    });
   }
 
-  getProviderHistory(id: string): ProviderUsage[] {
-    return this.jobs.get(id)?.provider_history ?? [];
+  async getProviderHistory(id: string): Promise<ProviderUsage[]> {
+    return (await this.getJob(id))?.provider_history ?? [];
   }
 
-  getProviderUsageSummary(
+  async getProviderUsageSummary(
     id: string,
     configuredProviders: AIProvider[] = []
-  ): ProviderUsageSummary {
-    const history = this.getProviderHistory(id);
-    const retries = this.getRetryHistory(id);
+  ): Promise<ProviderUsageSummary> {
+    const history = await this.getProviderHistory(id);
+    const retries = await this.getRetryHistory(id);
     const allProviders: AIProvider[] = [
       "gemini",
       "deepseek",
@@ -297,64 +330,184 @@ export class JobStore {
     }, {} as ProviderUsageSummary);
   }
 
-  getRetryHistory(id: string): RetryEntry[] {
-    return this.jobs.get(id)?.retry_history ?? [];
+  async getRetryHistory(id: string): Promise<RetryEntry[]> {
+    return (await this.getJob(id))?.retry_history ?? [];
   }
 
-  getValidationSnapshots(id: string): ValidationSnapshot[] {
-    return this.jobs.get(id)?.validation_snapshots ?? [];
+  async getValidationSnapshots(id: string): Promise<ValidationSnapshot[]> {
+    return (await this.getJob(id))?.validation_snapshots ?? [];
   }
-  addEventListener(
-    id: string,
-    listener: (event: StageEvent) => void
-  ): () => void {
-    const listeners = this.listeners.get(id) || new Set();
+
+  addEventListener(id: string, listener: Listener): () => void {
+    const listeners = this.listeners.get(id) || new Set<Listener>();
     listeners.add(listener);
     this.listeners.set(id, listeners);
 
-    // Return unsubscribe function
     return () => {
       listeners.delete(listener);
     };
   }
 
-  getEvents(id: string): StageEvent[] {
-    const state = this.jobs.get(id);
-    return state?.events ?? [];
+  async getEvents(id: string): Promise<StageEvent[]> {
+    return (await this.getJob(id))?.events ?? [];
   }
 
-  getRepairs(id: string): RepairLog[] {
-    const state = this.jobs.get(id);
-    return state?.repairs ?? [];
+  async getRepairs(id: string): Promise<RepairLog[]> {
+    return (await this.getJob(id))?.repairs ?? [];
   }
 
-  private _notifyListeners(id: string, event: StageEvent): void {
-    const listeners = this.listeners.get(id);
-    if (listeners) {
-      for (const listener of listeners) {
-        try {
-          listener(event); // Explicit type for event
-        } catch (error) {
-          console.error("Error in event listener:", error);
-        }
-      }
+  async cleanup(): Promise<void> {
+    if (this.redisConfig) {
+      return;
     }
-  }
 
-  // Cleanup old jobs (optional, for production)
-  cleanup(maxAgeMs: number = 24 * 60 * 60 * 1000): void {
     const now = Date.now();
-    for (const [id, state] of this.jobs.entries()) {
-      const createdAt = new Date(state.job.created_at).getTime();
-      if (now - createdAt > maxAgeMs) {
-        this.jobs.delete(id);
+    for (const [id, state] of this.memoryJobs.entries()) {
+      const updatedAt = new Date(state.job.updated_at).getTime();
+      if (now - updatedAt > JOB_TTL_SECONDS * 1000) {
+        this.memoryJobs.delete(id);
         this.listeners.delete(id);
       }
     }
   }
+
+  private async mutateState(
+    id: string,
+    mutator: (state: JobState) => void | Promise<void>
+  ): Promise<JobState | undefined> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= REDIS_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        const state = await this.readState(id);
+        if (!state) {
+          return undefined;
+        }
+
+        await mutator(state);
+        await this.persistState(id, state);
+        return state;
+      } catch (error) {
+        lastError = error;
+        logger.warn("Job update retry", {
+          jobId: id,
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await sleep(REDIS_RETRY_DELAY_MS * attempt);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private async readState(id: string): Promise<JobState | undefined> {
+    if (!this.redisConfig) {
+      return this.memoryJobs.get(id);
+    }
+
+    const raw = await this.redisCommand<string | null>(["GET", this.key(id)]);
+    logger.debug("Redis read", {
+      jobId: id,
+      hit: Boolean(raw),
+      key: this.key(id),
+    });
+    if (!raw) {
+      return undefined;
+    }
+
+    return JSON.parse(raw) as JobState;
+  }
+
+  private async persistState(id: string, state: JobState): Promise<void> {
+    if (!this.redisConfig) {
+      this.memoryJobs.set(id, state);
+      return;
+    }
+
+    await this.redisCommand<string>([
+      "SET",
+      this.key(id),
+      JSON.stringify(state),
+      "EX",
+      JOB_TTL_SECONDS,
+    ]);
+    logger.debug("Redis write", {
+      jobId: id,
+      key: this.key(id),
+      ttlSeconds: JOB_TTL_SECONDS,
+      status: state.job.status,
+      eventCount: state.events.length,
+      repairCount: state.repairs.length,
+    });
+  }
+
+  private async redisCommand<T>(command: RedisCommand): Promise<T> {
+    if (!this.redisConfig) {
+      throw new Error("Redis is not configured");
+    }
+
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= REDIS_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await fetch(this.redisConfig.url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.redisConfig.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(command),
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error(`Redis command failed: ${response.status} ${response.statusText}`);
+        }
+
+        const payload = (await response.json()) as RedisEnvelope<T>;
+        if (payload.error) {
+          throw new Error(payload.error);
+        }
+
+        return payload.result as T;
+      } catch (error) {
+        lastError = error;
+        logger.warn("Redis command retry", {
+          command: command[0],
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await sleep(REDIS_RETRY_DELAY_MS * attempt);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private notifyListeners(id: string, event: StageEvent): void {
+    const listeners = this.listeners.get(id);
+    if (!listeners) {
+      return;
+    }
+
+    for (const listener of listeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        logger.warn("Job listener failed", {
+          jobId: id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  private key(id: string): string {
+    return `oneatlas:job:${id}`;
+  }
 }
 
-// Ensure a single JobStore instance across module reloads (Next.js dev hot reloads)
 const globalRef = globalThis as unknown as {
   __jobStore?: JobStore;
 };
@@ -363,6 +516,43 @@ if (!globalRef.__jobStore) {
 }
 
 export const jobStore: JobStore = globalRef.__jobStore;
+
+function resolveRedisConfig(): RedisConfig | null {
+  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
+
+  if (!url || !token) {
+    logger.warn("Persistent job store not configured; falling back to in-memory storage");
+    return null;
+  }
+
+  return { url, token };
+}
+
+function emptyMetrics(): PipelineMetrics {
+  return {
+    tokens: {
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      estimated_cost: 0,
+    },
+    latency: {
+      intent_stage_ms: 0,
+      schema_stage_ms: 0,
+      spec_stage_ms: 0,
+      total_ms: 0,
+    },
+    repair_attempts: 0,
+    successful_repairs: 0,
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 function quotaForProvider(provider: AIProvider): number | undefined {
   const quotas: Partial<Record<AIProvider, number>> = {

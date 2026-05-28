@@ -113,9 +113,9 @@ export class PipelineExecutor {
     this.costTracker = new CostTracker();
   }
 
-  private _updateMetrics(jobId: string): void {
+  private async _updateMetrics(jobId: string): Promise<void> {
     const totals = this.costTracker.getTotals();
-    const state = jobStore.getJob(jobId);
+    const state = await jobStore.getJob(jobId);
     if (!state) return; // Guard against state loss during long serverless execution
 
     const repairs = state.repairs;
@@ -133,17 +133,17 @@ export class PipelineExecutor {
       ).length,
     };
 
-    jobStore.setMetrics(jobId, metrics);
+    await jobStore.setMetrics(jobId, metrics);
   }
 
-  private _recordProviderUsage(
+  private async _recordProviderUsage(
     jobId: string,
     stage: PipelineStage,
     provider: AIProvider,
     model: string,
     response: AIResponse,
     attempt: number
-  ): void {
+  ): Promise<void> {
     const cost = this.costTracker.recordCost(
       `${provider}/${model}`,
       response.usage.input_tokens,
@@ -169,11 +169,11 @@ export class PipelineExecutor {
       retry_count: Math.max(0, attempt - 1),
     };
 
-    jobStore.addProviderUsage(jobId, providerUsage);
+    await jobStore.addProviderUsage(jobId, providerUsage);
 
     // Emit a lightweight provider usage event for live SSE consumption
     try {
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_provider_usage",
         stage,
         timestamp: new Date().toISOString(),
@@ -186,7 +186,7 @@ export class PipelineExecutor {
       logger.warn("Failed to emit provider usage event", { error: String(err) });
     }
 
-    this._updateMetrics(jobId);
+    await this._updateMetrics(jobId);
   }
 
   private async _sendWithRetry( // Explicit return type
@@ -247,7 +247,7 @@ const routes = [
 
         const effectiveAttempt = response.provider === provider ? attempt + 1 : attempt + 2;
 
-        this._recordProviderUsage(
+        await this._recordProviderUsage(
           jobId,
           stage,
           response.provider,
@@ -257,7 +257,7 @@ const routes = [
         );
 
         if (attempt > 0 || response.provider !== provider) {
-          jobStore.addEvent(jobId, {
+          await jobStore.addEvent(jobId, {
             type: "stage_retry",
             stage,
             timestamp: new Date().toISOString(),
@@ -282,7 +282,7 @@ const routes = [
           maxAttempts,
         });
 
-        jobStore.addRetryHistory(jobId, {
+        await jobStore.addRetryHistory(jobId, {
           stage,
           attempt: attempt + 1,
           provider,
@@ -291,7 +291,7 @@ const routes = [
           timestamp: new Date().toISOString(),
         });
 
-        jobStore.addEvent(jobId, {
+        await jobStore.addEvent(jobId, {
           type: "stage_retry",
           stage,
           timestamp: new Date().toISOString(),
@@ -318,14 +318,14 @@ const routes = [
     let schema: DataSchema | undefined;
     let spec: AppSpec | undefined;
     
-    const state = jobStore.getJob(jobId);
+    const state = await jobStore.getJob(jobId);
     if (!state) {
       logger.error(`[Executor] Aborting execution: Job ${jobId} not found in store`);
       return;
     }
 
     try {
-      jobStore.updateJobStatus(jobId, "processing");
+      await jobStore.updateJobStatus(jobId, "processing");
       logger.info(`[Executor] Beginning pipeline stages for: ${jobId}`);
 
       // Stage 1: Intent Extraction
@@ -350,13 +350,13 @@ const routes = [
         intent,
         schema,
         spec,
-        repairs_applied: jobStore.getRepairs(jobId),
+        repairs_applied: await jobStore.getRepairs(jobId),
       };
 
-      jobStore.setJobResult(jobId, result);
+      await jobStore.setJobResult(jobId, result);
 
       const totals = this.costTracker.getTotals();
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "generation_complete",
         stage: "complete",
         timestamp: new Date().toISOString(),
@@ -368,7 +368,7 @@ const routes = [
         },
       });
 
-      this._updateMetrics(jobId);
+      await this._updateMetrics(jobId);
 
       logger.info("Pipeline execution completed", {
         jobId,
@@ -377,8 +377,8 @@ const routes = [
       });
     } catch (error) {
       const errorMsg = String(error);
-      jobStore.setJobError(jobId, errorMsg);
-      jobStore.addEvent(jobId, {
+      await jobStore.setJobError(jobId, errorMsg);
+      await jobStore.addEvent(jobId, {
         type: "stage_failed",
         stage: "failed",
         timestamp: new Date().toISOString(),
@@ -390,7 +390,7 @@ const routes = [
   }
 
   private async _executeIntentStage(jobId: string, prompt: string): Promise<AppIntent> { // Explicit return type
-    jobStore.addEvent(jobId, {
+    await jobStore.addEvent(jobId, {
       type: "stage_start",
       stage: "intent",
       timestamp: new Date().toISOString(),
@@ -400,7 +400,7 @@ const routes = [
     try {
       const modelRoutingConfig = MODEL_ROUTING.intent;
 
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_start",
         stage: "intent",
         timestamp: new Date().toISOString(),
@@ -433,7 +433,7 @@ const routes = [
       Object.assign(intentSource, intentRepair.data);
 
       for (const log of intentRepair.logs) {
-        jobStore.addRepair(jobId, log);
+        await jobStore.addRepair(jobId, log);
       }
 
       // Apply repairs
@@ -452,12 +452,12 @@ const routes = [
       );
 
       for (const log of repairLogs) {
-        jobStore.addRepair(jobId, log);
+        await jobStore.addRepair(jobId, log);
       }
 
       // Validate
       const validationResult = validationEngine.validateAppIntent(repairedData);
-      jobStore.addValidationSnapshot(jobId, {
+      await jobStore.addValidationSnapshot(jobId, {
         stage: "intent",
         valid: validationResult.valid,
         errors: validationResult.errors,
@@ -472,9 +472,9 @@ const routes = [
 
       const intent = AppIntentSchema.parse(repairedData) as AppIntent;
       // Persist output immediately to survive instance transitions
-      jobStore.setStageOutput(jobId, "intent", intent); 
+      await jobStore.setStageOutput(jobId, "intent", intent); 
 
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_complete",
         stage: "intent",
         timestamp: new Date().toISOString(),
@@ -485,7 +485,7 @@ const routes = [
       return intent;
     } catch (error) {
       const errorMsg = String(error);
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_failed",
         stage: "intent",
         timestamp: new Date().toISOString(),
@@ -500,7 +500,7 @@ const routes = [
     intent: AppIntent,
     prompt: string
   ): Promise<DataSchema> {
-    jobStore.addEvent(jobId, {
+    await jobStore.addEvent(jobId, {
       type: "stage_start",
       stage: "schema",
       timestamp: new Date().toISOString(),
@@ -512,7 +512,7 @@ const routes = [
 
       const intentSummary = `App: ${intent.appName}\nType: ${intent.appType}\nFeatures: ${intent.features.join(", ")}\nEntities: ${intent.entities.join(", ")}`;
 
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_start",
         stage: "schema",
         timestamp: new Date().toISOString(),
@@ -615,11 +615,11 @@ if (
       );
 
       for (const log of repairLogs) {
-        jobStore.addRepair(jobId, log);
+        await jobStore.addRepair(jobId, log);
       }
 
       const validationResult = validationEngine.validateDataSchema(repairedSchemaData);
-      jobStore.addValidationSnapshot(jobId, {
+      await jobStore.addValidationSnapshot(jobId, {
         stage: "schema",
         valid: validationResult.valid,
         errors: validationResult.errors,
@@ -634,9 +634,9 @@ if (
 
       const schema = DataSchemaSchema.parse(repairedSchemaData) as DataSchema;
       // Persist output immediately
-      jobStore.setStageOutput(jobId, "schema", schema);
+      await jobStore.setStageOutput(jobId, "schema", schema);
 
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_complete",
         stage: "schema",
         timestamp: new Date().toISOString(),
@@ -647,7 +647,7 @@ if (
       return schema;
     } catch (error) {
       const errorMsg = String(error);
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_failed",
         stage: "schema",
         timestamp: new Date().toISOString(),
@@ -663,7 +663,7 @@ if (
     schema: DataSchema,
     prompt: string
   ): Promise<AppSpec> {
-    jobStore.addEvent(jobId, {
+    await jobStore.addEvent(jobId, {
       type: "stage_start",
       stage: "spec",
       timestamp: new Date().toISOString(),
@@ -718,7 +718,7 @@ if (
       );
 
       for (const log of fieldRepairLogs) {
-        jobStore.addRepair(jobId, log);
+        await jobStore.addRepair(jobId, log);
       }
 
       this._ensureMinimumSpec(fieldRepairedSpec, intent, schema);
@@ -732,11 +732,11 @@ if (
       );
 
       for (const log of repairLogs) {
-        jobStore.addRepair(jobId, log);
+        await jobStore.addRepair(jobId, log);
       }
 
       const validationResult = validationEngine.validateAppSpec(repairedSpec);
-      jobStore.addValidationSnapshot(jobId, {
+      await jobStore.addValidationSnapshot(jobId, {
         stage: "spec",
         valid: validationResult.valid,
         errors: validationResult.errors,
@@ -751,7 +751,7 @@ if (
         this._coerceSpecCollections(repairedSpec, intent, schema);
         this._ensureMinimumSpec(repairedSpec, intent, schema);
         const secondPass = validationEngine.validateAppSpec(repairedSpec);
-        jobStore.addValidationSnapshot(jobId, {
+        await jobStore.addValidationSnapshot(jobId, {
           stage: "spec",
           valid: secondPass.valid,
           errors: secondPass.errors,
@@ -766,9 +766,9 @@ if (
 
       const spec = AppSpecSchema.parse(repairedSpec) as AppSpec;
       // Persist output immediately
-      jobStore.setStageOutput(jobId, "spec", spec);
+      await jobStore.setStageOutput(jobId, "spec", spec);
 
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_complete",
         stage: "spec",
         timestamp: new Date().toISOString(),
@@ -799,17 +799,17 @@ if (
           ...sectionEndpoints,
           ...sectionFlows,
         });
-        jobStore.setStageOutput(jobId, "spec", partialSpec);
-        jobStore.setPartialJobResult(jobId, {
+        await jobStore.setStageOutput(jobId, "spec", partialSpec);
+        await jobStore.setPartialJobResult(jobId, {
           intent,
           schema,
           spec: partialSpec,
-          repairs_applied: jobStore.getRepairs(jobId),
+          repairs_applied: await jobStore.getRepairs(jobId),
         });
       }
 
-      jobStore.setJobError(jobId, errorMsg);
-      jobStore.addEvent(jobId, {
+      await jobStore.setJobError(jobId, errorMsg);
+      await jobStore.addEvent(jobId, {
         type: "stage_failed",
         stage: "spec",
         timestamp: new Date().toISOString(),
@@ -860,7 +860,7 @@ if (
         throw new Error(`Spec ${sectionName} extraction failed: ${extract.error ?? "invalid JSON"}`);
       }
 
-      jobStore.addValidationSnapshot(jobId, {
+      await jobStore.addValidationSnapshot(jobId, {
         stage: "spec",
         valid: true,
         errors: [],
@@ -879,7 +879,7 @@ if (
         sectionName,
         error: message,
       });
-      jobStore.addRepair(jobId, {
+      await jobStore.addRepair(jobId, {
         timestamp: new Date().toISOString(),
         stage: "spec",
         strategy: "structural_repair",
@@ -888,7 +888,7 @@ if (
         outcome: "partial",
         details: { error: message },
       });
-      jobStore.addEvent(jobId, {
+      await jobStore.addEvent(jobId, {
         type: "stage_retry",
         stage: "spec",
         timestamp: new Date().toISOString(),

@@ -83,7 +83,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     // Create job
     const jobId = uuidv4();
-    jobStore.createJob(jobId, trimmedPrompt);
+    await jobStore.createJob(jobId, trimmedPrompt);
 
     logger.info("Generation job created", { jobId, promptLength: trimmedPrompt.length });
 

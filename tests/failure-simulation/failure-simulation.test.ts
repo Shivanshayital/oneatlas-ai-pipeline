@@ -53,11 +53,11 @@ describe("Failure simulation suite", () => {
     const executor = new PipelineExecutor(gateway);
     const jobId = `test-${Date.now()}-recovery`;
 
-    jobStore.createJob(jobId, "Run recovery scenario");
+    await jobStore.createJob(jobId, "Run recovery scenario");
 
     await expect(executor.executePipeline(jobId, "Run recovery scenario")).resolves.toBeUndefined();
 
-    const jobState = jobStore.getJob(jobId);
+    const jobState = await jobStore.getJob(jobId);
     expect(jobState).toBeDefined();
     expect(jobState?.job.status).toBe("completed");
     expect(jobState?.repairs.length).toBeGreaterThan(0);
@@ -76,11 +76,11 @@ describe("Failure simulation suite", () => {
     const executor = new PipelineExecutor(gateway);
     const jobId = `test-${Date.now()}-failure`;
 
-    jobStore.createJob(jobId, "Run unrecoverable failure scenario");
+    await jobStore.createJob(jobId, "Run unrecoverable failure scenario");
 
     await expect(executor.executePipeline(jobId, "Run unrecoverable failure scenario")).rejects.toBeDefined();
 
-    const jobState = jobStore.getJob(jobId);
+    const jobState = await jobStore.getJob(jobId);
     expect(jobState).toBeDefined();
     expect(jobState?.job.status).toBe("failed");
     expect(jobState?.events.some((event) => event.type === "stage_failed")).toBe(true);

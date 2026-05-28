@@ -36,9 +36,14 @@ export async function GET(
 
     if (!jobState) {
       logger.warn("Stream waiting for job timed out", { jobId });
-      return NextResponse.json(
-        { status: "waiting", job_id: jobId },
-        { status: 202 }
+      return terminalSseResponse(
+        {
+          type: "stage_failed",
+          stage: "failed",
+          timestamp: new Date().toISOString(),
+          error: "Job not found after stream hydration retry",
+        },
+        jobId
       );
     }
 
@@ -46,7 +51,7 @@ export async function GET(
     let cleanup: (() => void) | undefined;
 
     const stream = new ReadableStream<Uint8Array>({
-      start(controller: ReadableStreamDefaultController<Uint8Array>): void { // Explicit return type
+      async start(controller: ReadableStreamDefaultController<Uint8Array>): Promise<void> {
         const encoder = new TextEncoder();
         let isClosed: boolean = false; // Explicit type
         let didCleanup = false;
@@ -109,15 +114,18 @@ export async function GET(
         };
 
         // Send existing events first
-        const existingEvents = jobStore.getEvents(jobId);
+        const existingEvents = await jobStore.getEvents(jobId);
         for (const event of existingEvents) {
           const message = formatSSEMessage(event);
           safeEnqueue(message);
         }
 
+        const latestState = await jobStore.getJob(jobId);
+        const terminalStatus = latestState?.job.status ?? jobState.job.status;
+
         // If already completed, send final event and close
-        if (jobState.job.status === "completed" || jobState.job.status === "failed") {
-          const terminalEvent = terminalEventForJob(jobState.job.status, jobState.job.error);
+        if (terminalStatus === "completed" || terminalStatus === "failed") {
+          const terminalEvent = terminalEventForJob(terminalStatus, latestState?.job.error ?? jobState.job.error);
           if (terminalEvent) {
             safeEnqueue(formatSSEMessage(terminalEvent));
           }
@@ -143,7 +151,7 @@ export async function GET(
           safeEnqueue(": heartbeat\n\n");
         }, 30000);
 
-        if (jobStore.startProcessing(jobId)) {
+        if (await jobStore.startProcessing(jobId)) {
           logger.info(`[SSE] Starting pipeline execution for job: ${jobId}`);
           
           try {
@@ -151,11 +159,11 @@ export async function GET(
             const gateway = initializePipeline(config);
             const executor = new PipelineExecutor(gateway);
 
-            executor.executePipeline(jobId, jobState.job.prompt).catch((error) => {
+            executor.executePipeline(jobId, jobState.job.prompt).catch(async (error) => {
               const message = error instanceof Error ? error.message : String(error);
               logger.error("Stream failed", error instanceof Error ? error : new Error(message), { jobId });
-              jobStore.setJobError(jobId, message);
-              jobStore.addEvent(jobId, {
+              await jobStore.setJobError(jobId, message);
+              await jobStore.addEvent(jobId, {
                 type: "stage_failed",
                 stage: "failed",
                 timestamp: new Date().toISOString(),
@@ -165,8 +173,8 @@ export async function GET(
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             logger.error("Stream failed", error instanceof Error ? error : new Error(message), { jobId });
-            jobStore.setJobError(jobId, message);
-            jobStore.addEvent(jobId, {
+            await jobStore.setJobError(jobId, message);
+            await jobStore.addEvent(jobId, {
               type: "stage_failed",
               stage: "failed",
               timestamp: new Date().toISOString(),
@@ -211,22 +219,53 @@ async function waitForJobState(
   const startedAt = Date.now();
 
   while (Date.now() - startedAt <= 3000) {
-    const jobState = jobStore.getJob(jobId);
+    const jobState = await jobStore.getJob(jobId);
     if (jobState) {
       return jobState;
     }
 
     if (promptFallback && promptFallback.trim().length >= 10) {
-      logger.info("Stream waiting for job; rehydrating from prompt fallback", { jobId });
-      jobStore.createJob(jobId, promptFallback.trim());
-      return jobStore.getJob(jobId);
+      logger.info("Stream hydration retry with prompt fallback", {
+        jobId,
+        elapsedMs: Date.now() - startedAt,
+      });
+      await jobStore.createJob(jobId, promptFallback.trim());
+      const hydratedState = await jobStore.getJob(jobId);
+      if (hydratedState) {
+        logger.info("Stream hydrated", { jobId });
+      }
+      return hydratedState;
     }
 
-    logger.info("Stream waiting for job", { jobId });
+    logger.info("Stream hydration retry", {
+      jobId,
+      elapsedMs: Date.now() - startedAt,
+    });
     await sleep(150);
   }
 
   return undefined;
+}
+
+function terminalSseResponse(event: StageEvent, jobId: string): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(formatSSEMessage(event)));
+      controller.close();
+      logger.info("Stream closed", { jobId, reason: "terminal_hydration_failure" });
+    },
+  });
+
+  return new NextResponse(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
 }
 
 function sleep(ms: number): Promise<void> {

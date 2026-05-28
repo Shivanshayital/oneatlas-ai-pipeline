@@ -40,13 +40,13 @@ export async function POST(
       );
     }
 
-    let jobState = jobStore.getJob(jobId);
+    let jobState = await jobStore.getJob(jobId);
 
     // Self-healing for Vercel statelessness
     if (!jobState && promptFallback) {
       logger.info("Rehydrating job for repair request", { jobId });
-      jobStore.createJob(jobId, promptFallback);
-      jobState = jobStore.getJob(jobId);
+      await jobStore.createJob(jobId, promptFallback);
+      jobState = await jobStore.getJob(jobId);
     }
 
     if (!jobState) {
@@ -57,7 +57,7 @@ export async function POST(
     }
 
     // Get stage output
-    const stageOutput: unknown = jobStore.getStageOutput(jobId, stage); // Explicit type
+    const stageOutput: unknown = await jobStore.getStageOutput(jobId, stage); // Explicit type
     if (!stageOutput) {
       return NextResponse.json(
         { error: `No output for stage: ${stage}` },
@@ -76,7 +76,7 @@ export async function POST(
         try {
           repairedData = JSON.parse(content);
           for (const log of logs) {
-            jobStore.addRepair(jobId, log);
+            await jobStore.addRepair(jobId, log);
             repairs.push({
               strategy: log.strategy,
               action: log.action,
@@ -101,7 +101,7 @@ export async function POST(
       );
       repairedData = fieldRepaired;
       for (const log of fieldLogs) {
-        jobStore.addRepair(jobId, log);
+        await jobStore.addRepair(jobId, log);
         repairs.push({
           strategy: log.strategy,
           action: log.action,
@@ -111,12 +111,12 @@ export async function POST(
     }
 
     if (!strategy || strategy === "consistency_repair") {
-      const schema = jobStore.getStageOutput(jobId, "schema") as DataSchema | null;
+      const schema = await jobStore.getStageOutput(jobId, "schema") as DataSchema | null;
       const { data: consistencyRepaired, logs: consistencyLogs } =
         repairEngine.repairConsistency(stage, repairedData, schema);
       repairedData = consistencyRepaired;
       for (const log of consistencyLogs) {
-        jobStore.addRepair(jobId, log);
+        await jobStore.addRepair(jobId, log);
         repairs.push({
           strategy: log.strategy,
           action: log.action,
@@ -144,7 +144,7 @@ export async function POST(
     }
 
     // Update stage output
-    jobStore.setStageOutput(jobId, stage, repairedData);
+    await jobStore.setStageOutput(jobId, stage, repairedData);
 
     logger.info("Manual repair completed", {
       jobId,

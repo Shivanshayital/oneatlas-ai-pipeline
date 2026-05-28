@@ -58,7 +58,7 @@ async function runEvaluation() {
 
   for (const prompt of prompts) {
     const jobId = uuidv4();
-    jobStore.createJob(jobId, prompt);
+    await jobStore.createJob(jobId, prompt);
 
     try {
       await executor.executePipeline(jobId, prompt);
@@ -66,7 +66,7 @@ async function runEvaluation() {
       // Pipeline errors are captured in job state already.
     }
 
-    const state = jobStore.getJob(jobId);
+    const state = await jobStore.getJob(jobId);
     if (!state) continue;
 
     const failedEvent = state.events.find((event) => event.type === "stage_failed");

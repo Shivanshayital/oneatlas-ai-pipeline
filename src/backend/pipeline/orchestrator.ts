@@ -29,12 +29,12 @@ export class PipelineOrchestrator {
    */
   async processPrompt(prompt: string): Promise<string> {
     const jobId = uuidv4();
-    jobStore.createJob(jobId, prompt);
+    await jobStore.createJob(jobId, prompt);
     return jobId;
   }
 
-  getJob(jobId: string): PipelineJob | undefined {
-    const state = jobStore.getJob(jobId);
+  async getJob(jobId: string): Promise<PipelineJob | undefined> {
+    const state = await jobStore.getJob(jobId);
     if (!state) {
       // Graceful detection: log the miss as it's a known side effect of serverless memory resets
       logger.warn(`[Orchestrator] Job ${jobId} not found in memory. This usually occurs after a Vercel serverless instance cold start.`);
